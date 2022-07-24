@@ -1,4 +1,4 @@
-/* { dg-do run { target *-*-solaris2* } } */
+/* { dg-do run { target *-*-solaris2.1[0-9]* } } */
 /* { dg-options "-std=c99 -O" } */
 
 #include <math.h>
