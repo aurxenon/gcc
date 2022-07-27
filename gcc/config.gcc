@@ -251,7 +251,8 @@ case ${target} in
  cr16-*-*				\
  | hppa[12]*-*-hpux10*			\
  | hppa[12]*-*-hpux11*			\
- | m32c-*-rtems*
+ | m32c-*-rtems*                \
+ | *-*-solaris2.10*             \
  )
     if test "x$enable_obsolete" != xyes; then
       echo "*** Configuration ${target} is obsolete." >&2
