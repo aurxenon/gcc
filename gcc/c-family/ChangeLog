@@ -1,3 +1,17 @@
+2022-07-31  Lewis Hyatt  <lhyatt@gmail.com>
+
+	PR c++/66290
+	* c-common.h: Rename global done_lexing to
+	override_libcpp_locations.
+	* c-common.cc (c_cpp_diagnostic): Likewise.
+	* c-opts.cc (c_common_finish): Set override_libcpp_locations
+	(formerly done_lexing) immediately prior to calling cpp_finish ().
+
+2022-07-27  Lewis Hyatt  <lhyatt@gmail.com>
+
+	* c-ppoutput.cc (token_streamer::stream): Update input_location
+	prior to streaming each token.
+
 2022-07-23  Immad Mir  <mirimmad@outlook.com>
 
 	* c-attribs.cc: (c_common_attribute_table): add three new attributes
