@@ -1313,7 +1313,8 @@ dnl
 dnl --enable-libstdcxx-time
 dnl --enable-libstdcxx-time=yes
 dnl        checks for the availability of monotonic and realtime clocks,
-dnl        nanosleep and sched_yield in libc.
+dnl        nanosleep and sched_yield in libc and libposix4 and, if needed,
+dnl        links in the latter.
 dnl --enable-libstdcxx-time=rt
 dnl        also searches (and, if needed, links) librt.  Note that this is
 dnl        not always desirable because, in glibc 2.16 and earlier, for
@@ -1386,6 +1387,7 @@ AC_DEFUN([GLIBCXX_ENABLE_LIBSTDCXX_TIME], [
         ac_has_nanosleep=yes
         ;;
       solaris*)
+        GLIBCXX_LIBS="$GLIBCXX_LIBS -lrt"
         ac_has_clock_monotonic=yes
         ac_has_clock_realtime=yes
         ac_has_nanosleep=yes
@@ -1399,11 +1401,11 @@ AC_DEFUN([GLIBCXX_ENABLE_LIBSTDCXX_TIME], [
   elif test x"$enable_libstdcxx_time" != x"no"; then
 
     if test x"$enable_libstdcxx_time" = x"rt"; then
-      AC_SEARCH_LIBS(clock_gettime, [rt])
-      AC_SEARCH_LIBS(nanosleep, [rt])
+      AC_SEARCH_LIBS(clock_gettime, [rt posix4])
+      AC_SEARCH_LIBS(nanosleep, [rt posix4])
     else
-      AC_CHECK_FUNC(clock_gettime)
-      AC_CHECK_FUNC(nanosleep)
+      AC_SEARCH_LIBS(clock_gettime, [posix4])
+      AC_SEARCH_LIBS(nanosleep, [posix4])
     fi
 
     case "$ac_cv_search_clock_gettime" in
@@ -1415,9 +1417,13 @@ AC_DEFUN([GLIBCXX_ENABLE_LIBSTDCXX_TIME], [
       ;;
     esac
 
-    AC_SEARCH_LIBS(sched_yield, [rt])
+    AC_SEARCH_LIBS(sched_yield, [rt posix4])
 
     case "$ac_cv_search_sched_yield" in
+      -lposix4*)
+      GLIBCXX_LIBS="$GLIBCXX_LIBS $ac_cv_search_sched_yield"
+      ac_has_sched_yield=yes
+      ;;
       -lrt*)
       if test x"$enable_libstdcxx_time" = x"rt"; then
 	GLIBCXX_LIBS="$GLIBCXX_LIBS $ac_cv_search_sched_yield"
