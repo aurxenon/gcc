@@ -267,7 +267,7 @@ module_resolver::IncludeTranslateRequest (Cody::Server *s, Cody::Flags,
       struct stat statbuf;
       bool ok = true;
 
-#if HAVE_FSTATAT
+#if HAVE_FSTATAT and defined(HOST_HAS_O_DIRECTORY)
       int fd_dir = AT_FDCWD;
       if (!repo.empty ())
 	{

@@ -116,6 +116,17 @@ if test $ac_cv_o_cloexec = yes; then
   [Define if O_CLOEXEC supported by fcntl.])
 fi
 
+# Check if O_DIRECTORY is defined by fcntl
+AC_CACHE_CHECK(for O_DIRECTORY, ac_cv_o_directory, [
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include <fcntl.h>]], [[
+return open ("/dev/null", O_RDONLY | O_DIRECTORY);]])],
+[ac_cv_o_directory=yes],[ac_cv_o_directory=no])])
+if test $ac_cv_o_directory = yes; then
+  AC_DEFINE(HOST_HAS_O_DIRECTORY, 1,
+  [Define if O_DIRECTORY supported by fcntl.])
+fi
+
 AC_CHECK_HEADERS(sys/mman.h)
 
 # C++ Modules would like some networking features to provide the mapping

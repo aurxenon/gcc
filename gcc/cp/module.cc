@@ -238,7 +238,7 @@ Classes used:
 #define MAPPED_READING 0
 #define MAPPED_WRITING 0
 #else
-#if HAVE_MMAP_FILE && _POSIX_MAPPED_FILES > 0
+#if HAVE_MMAP_FILE && HAVE_DECL_MADVISE && _POSIX_MAPPED_FILES > 0
 /* mmap, munmap.  */
 #define MAPPED_READING 1
 #if HAVE_SYSCONF && defined (_SC_PAGE_SIZE)

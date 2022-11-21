@@ -108,8 +108,7 @@
 /* Define to 1 if GNU symbol versioning is used for libitm. */
 #undef LIBITM_GNU_SYMBOL_VERSIONING
 
-/* Define to the sub-directory in which libtool stores uninstalled libraries.
-   */
+/* Define to the sub-directory where libtool stores uninstalled libraries. */
 #undef LT_OBJDIR
 
 /* Define to the letter to which size_t is mangled. */

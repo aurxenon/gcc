@@ -1,6 +1,6 @@
-# generated automatically by aclocal 1.15.1 -*- Autoconf -*-
+# generated automatically by aclocal 1.16.5 -*- Autoconf -*-
 
-# Copyright (C) 1996-2017 Free Software Foundation, Inc.
+# Copyright (C) 1996-2021 Free Software Foundation, Inc.
 
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -20,7 +20,7 @@ You have another version of autoconf.  It may work, but is not guaranteed to.
 If you have problems, you may need to regenerate the build system entirely.
 To do so, use the procedure documented by the package, typically 'autoreconf'.])])
 
-# Copyright (C) 2002-2017 Free Software Foundation, Inc.
+# Copyright (C) 2002-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -32,10 +32,10 @@ To do so, use the procedure documented by the package, typically 'autoreconf'.])
 # generated from the m4 files accompanying Automake X.Y.
 # (This private macro should not be called outside this file.)
 AC_DEFUN([AM_AUTOMAKE_VERSION],
-[am__api_version='1.15'
+[am__api_version='1.16'
 dnl Some users find AM_AUTOMAKE_VERSION and mistake it for a way to
 dnl require some minimum version.  Point them to the right macro.
-m4_if([$1], [1.15.1], [],
+m4_if([$1], [1.16.5], [],
       [AC_FATAL([Do not call $0, use AM_INIT_AUTOMAKE([$1]).])])dnl
 ])
 
@@ -51,14 +51,14 @@ m4_define([_AM_AUTOCONF_VERSION], [])
 # Call AM_AUTOMAKE_VERSION and AM_AUTOMAKE_VERSION so they can be traced.
 # This function is AC_REQUIREd by AM_INIT_AUTOMAKE.
 AC_DEFUN([AM_SET_CURRENT_AUTOMAKE_VERSION],
-[AM_AUTOMAKE_VERSION([1.15.1])dnl
+[AM_AUTOMAKE_VERSION([1.16.5])dnl
 m4_ifndef([AC_AUTOCONF_VERSION],
   [m4_copy([m4_PACKAGE_VERSION], [AC_AUTOCONF_VERSION])])dnl
 _AM_AUTOCONF_VERSION(m4_defn([AC_AUTOCONF_VERSION]))])
 
 # AM_AUX_DIR_EXPAND                                         -*- Autoconf -*-
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -110,7 +110,7 @@ am_aux_dir=`cd "$ac_aux_dir" && pwd`
 
 # AM_CONDITIONAL                                            -*- Autoconf -*-
 
-# Copyright (C) 1997-2017 Free Software Foundation, Inc.
+# Copyright (C) 1997-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -141,7 +141,7 @@ AC_CONFIG_COMMANDS_PRE(
 Usually this means the macro was only invoked conditionally.]])
 fi])])
 
-# Copyright (C) 1999-2017 Free Software Foundation, Inc.
+# Copyright (C) 1999-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -332,12 +332,11 @@ _AM_SUBST_NOTMAKE([am__nodep])dnl
 
 # Generate code to set up dependency tracking.              -*- Autoconf -*-
 
-# Copyright (C) 1999-2017 Free Software Foundation, Inc.
+# Copyright (C) 1999-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
 # with or without modifications, as long as this notice is preserved.
-
 
 # _AM_OUTPUT_DEPENDENCY_COMMANDS
 # ------------------------------
@@ -346,49 +345,43 @@ AC_DEFUN([_AM_OUTPUT_DEPENDENCY_COMMANDS],
   # Older Autoconf quotes --file arguments for eval, but not when files
   # are listed without --file.  Let's play safe and only enable the eval
   # if we detect the quoting.
-  case $CONFIG_FILES in
-  *\'*) eval set x "$CONFIG_FILES" ;;
-  *)   set x $CONFIG_FILES ;;
-  esac
+  # TODO: see whether this extra hack can be removed once we start
+  # requiring Autoconf 2.70 or later.
+  AS_CASE([$CONFIG_FILES],
+          [*\'*], [eval set x "$CONFIG_FILES"],
+          [*], [set x $CONFIG_FILES])
   shift
-  for mf
+  # Used to flag and report bootstrapping failures.
+  am_rc=0
+  for am_mf
   do
     # Strip MF so we end up with the name of the file.
-    mf=`echo "$mf" | sed -e 's/:.*$//'`
-    # Check whether this is an Automake generated Makefile or not.
-    # We used to match only the files named 'Makefile.in', but
-    # some people rename them; so instead we look at the file content.
-    # Grep'ing the first line is not enough: some people post-process
-    # each Makefile.in and add a new line on top of each file to say so.
-    # Grep'ing the whole file is not good either: AIX grep has a line
+    am_mf=`AS_ECHO(["$am_mf"]) | sed -e 's/:.*$//'`
+    # Check whether this is an Automake generated Makefile which includes
+    # dependency-tracking related rules and includes.
+    # Grep'ing the whole file directly is not great: AIX grep has a line
     # limit of 2048, but all sed's we know have understand at least 4000.
-    if sed -n 's,^#.*generated by automake.*,X,p' "$mf" | grep X >/dev/null 2>&1; then
-      dirpart=`AS_DIRNAME("$mf")`
-    else
-      continue
-    fi
-    # Extract the definition of DEPDIR, am__include, and am__quote
-    # from the Makefile without running 'make'.
-    DEPDIR=`sed -n 's/^DEPDIR = //p' < "$mf"`
-    test -z "$DEPDIR" && continue
-    am__include=`sed -n 's/^am__include = //p' < "$mf"`
-    test -z "$am__include" && continue
-    am__quote=`sed -n 's/^am__quote = //p' < "$mf"`
-    # Find all dependency output files, they are included files with
-    # $(DEPDIR) in their names.  We invoke sed twice because it is the
-    # simplest approach to changing $(DEPDIR) to its actual value in the
-    # expansion.
-    for file in `sed -n "
-      s/^$am__include $am__quote\(.*(DEPDIR).*\)$am__quote"'$/\1/p' <"$mf" | \
-	 sed -e 's/\$(DEPDIR)/'"$DEPDIR"'/g'`; do
-      # Make sure the directory exists.
-      test -f "$dirpart/$file" && continue
-      fdir=`AS_DIRNAME(["$file"])`
-      AS_MKDIR_P([$dirpart/$fdir])
-      # echo "creating $dirpart/$file"
-      echo '# dummy' > "$dirpart/$file"
-    done
+    sed -n 's,^am--depfiles:.*,X,p' "$am_mf" | grep X >/dev/null 2>&1 \
+      || continue
+    am_dirpart=`AS_DIRNAME(["$am_mf"])`
+    am_filepart=`AS_BASENAME(["$am_mf"])`
+    AM_RUN_LOG([cd "$am_dirpart" \
+      && sed -e '/# am--include-marker/d' "$am_filepart" \
+        | $MAKE -f - am--depfiles]) || am_rc=$?
   done
+  if test $am_rc -ne 0; then
+    AC_MSG_FAILURE([Something went wrong bootstrapping makefile fragments
+    for automatic dependency tracking.  If GNU make was not used, consider
+    re-running the configure script with MAKE="gmake" (or whatever is
+    necessary).  You can also try re-running configure with the
+    '--disable-dependency-tracking' option to at least be able to build
+    the package (albeit without support for automatic dependency tracking).])
+  fi
+  AS_UNSET([am_dirpart])
+  AS_UNSET([am_filepart])
+  AS_UNSET([am_mf])
+  AS_UNSET([am_rc])
+  rm -f conftest-deps.mk
 }
 ])# _AM_OUTPUT_DEPENDENCY_COMMANDS
 
@@ -397,18 +390,17 @@ AC_DEFUN([_AM_OUTPUT_DEPENDENCY_COMMANDS],
 # -----------------------------
 # This macro should only be invoked once -- use via AC_REQUIRE.
 #
-# This code is only required when automatic dependency tracking
-# is enabled.  FIXME.  This creates each '.P' file that we will
-# need in order to bootstrap the dependency handling code.
+# This code is only required when automatic dependency tracking is enabled.
+# This creates each '.Po' and '.Plo' makefile fragment that we'll need in
+# order to bootstrap the dependency handling code.
 AC_DEFUN([AM_OUTPUT_DEPENDENCY_COMMANDS],
 [AC_CONFIG_COMMANDS([depfiles],
      [test x"$AMDEP_TRUE" != x"" || _AM_OUTPUT_DEPENDENCY_COMMANDS],
-     [AMDEP_TRUE="$AMDEP_TRUE" ac_aux_dir="$ac_aux_dir"])
-])
+     [AMDEP_TRUE="$AMDEP_TRUE" MAKE="${MAKE-make}"])])
 
 # Do all the work for Automake.                             -*- Autoconf -*-
 
-# Copyright (C) 1996-2017 Free Software Foundation, Inc.
+# Copyright (C) 1996-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -436,6 +428,10 @@ m4_defn([AC_PROG_CC])
 # release and drop the old call support.
 AC_DEFUN([AM_INIT_AUTOMAKE],
 [AC_PREREQ([2.65])dnl
+m4_ifdef([_$0_ALREADY_INIT],
+  [m4_fatal([$0 expanded multiple times
+]m4_defn([_$0_ALREADY_INIT]))],
+  [m4_define([_$0_ALREADY_INIT], m4_expansion_stack)])dnl
 dnl Autoconf wants to disallow AM_ names.  We explicitly allow
 dnl the ones we care about.
 m4_pattern_allow([^AM_[A-Z]+FLAGS$])dnl
@@ -472,7 +468,7 @@ m4_ifval([$3], [_AM_SET_OPTION([no-define])])dnl
 [_AM_SET_OPTIONS([$1])dnl
 dnl Diagnose old-style AC_INIT with new-style AM_AUTOMAKE_INIT.
 m4_if(
-  m4_ifdef([AC_PACKAGE_NAME], [ok]):m4_ifdef([AC_PACKAGE_VERSION], [ok]),
+  m4_ifset([AC_PACKAGE_NAME], [ok]):m4_ifset([AC_PACKAGE_VERSION], [ok]),
   [ok:ok],,
   [m4_fatal([AC_INIT should be called with package and version arguments])])dnl
  AC_SUBST([PACKAGE], ['AC_PACKAGE_TARNAME'])dnl
@@ -495,8 +491,8 @@ AC_REQUIRE([AM_PROG_INSTALL_STRIP])dnl
 AC_REQUIRE([AC_PROG_MKDIR_P])dnl
 # For better backward compatibility.  To be removed once Automake 1.9.x
 # dies out for good.  For more background, see:
-# <http://lists.gnu.org/archive/html/automake/2012-07/msg00001.html>
-# <http://lists.gnu.org/archive/html/automake/2012-07/msg00014.html>
+# <https://lists.gnu.org/archive/html/automake/2012-07/msg00001.html>
+# <https://lists.gnu.org/archive/html/automake/2012-07/msg00014.html>
 AC_SUBST([mkdir_p], ['$(MKDIR_P)'])
 # We need awk for the "check" target (and possibly the TAP driver).  The
 # system "awk" is bad on some platforms.
@@ -524,6 +520,20 @@ AC_PROVIDE_IFELSE([AC_PROG_OBJCXX],
 		  [m4_define([AC_PROG_OBJCXX],
 			     m4_defn([AC_PROG_OBJCXX])[_AM_DEPENDENCIES([OBJCXX])])])dnl
 ])
+# Variables for tags utilities; see am/tags.am
+if test -z "$CTAGS"; then
+  CTAGS=ctags
+fi
+AC_SUBST([CTAGS])
+if test -z "$ETAGS"; then
+  ETAGS=etags
+fi
+AC_SUBST([ETAGS])
+if test -z "$CSCOPE"; then
+  CSCOPE=cscope
+fi
+AC_SUBST([CSCOPE])
+
 AC_REQUIRE([AM_SILENT_RULES])dnl
 dnl The testsuite driver may need to know about EXEEXT, so add the
 dnl 'am__EXEEXT' conditional if _AM_COMPILER_EXEEXT was seen.  This
@@ -563,7 +573,7 @@ END
 Aborting the configuration process, to ensure you take notice of the issue.
 
 You can download and install GNU coreutils to get an 'rm' implementation
-that behaves properly: <http://www.gnu.org/software/coreutils/>.
+that behaves properly: <https://www.gnu.org/software/coreutils/>.
 
 If you want to complete the configuration process using your problematic
 'rm' anyway, export the environment variable ACCEPT_INFERIOR_RM_PROGRAM
@@ -605,7 +615,7 @@ for _am_header in $config_headers :; do
 done
 echo "timestamp for $_am_arg" >`AS_DIRNAME(["$_am_arg"])`/stamp-h[]$_am_stamp_count])
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -629,7 +639,7 @@ AC_SUBST([install_sh])])
 # Add --enable-maintainer-mode option to configure.         -*- Autoconf -*-
 # From Jim Meyering
 
-# Copyright (C) 1996-2017 Free Software Foundation, Inc.
+# Copyright (C) 1996-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -664,7 +674,7 @@ AC_MSG_CHECKING([whether to enable maintainer-specific portions of Makefiles])
 
 # Check to see how 'make' treats includes.	            -*- Autoconf -*-
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -672,49 +682,42 @@ AC_MSG_CHECKING([whether to enable maintainer-specific portions of Makefiles])
 
 # AM_MAKE_INCLUDE()
 # -----------------
-# Check to see how make treats includes.
+# Check whether make has an 'include' directive that can support all
+# the idioms we need for our automatic dependency tracking code.
 AC_DEFUN([AM_MAKE_INCLUDE],
-[am_make=${MAKE-make}
-cat > confinc << 'END'
+[AC_MSG_CHECKING([whether ${MAKE-make} supports the include directive])
+cat > confinc.mk << 'END'
 am__doit:
-	@echo this is the am__doit target
+	@echo this is the am__doit target >confinc.out
 .PHONY: am__doit
 END
-# If we don't find an include directive, just comment out the code.
-AC_MSG_CHECKING([for style of include used by $am_make])
 am__include="#"
 am__quote=
-_am_result=none
-# First try GNU make style include.
-echo "include confinc" > confmf
-# Ignore all kinds of additional output from 'make'.
-case `$am_make -s -f confmf 2> /dev/null` in #(
-*the\ am__doit\ target*)
-  am__include=include
-  am__quote=
-  _am_result=GNU
-  ;;
-esac
-# Now try BSD make style include.
-if test "$am__include" = "#"; then
-   echo '.include "confinc"' > confmf
-   case `$am_make -s -f confmf 2> /dev/null` in #(
-   *the\ am__doit\ target*)
-     am__include=.include
-     am__quote="\""
-     _am_result=BSD
-     ;;
-   esac
-fi
-AC_SUBST([am__include])
-AC_SUBST([am__quote])
-AC_MSG_RESULT([$_am_result])
-rm -f confinc confmf
-])
+# BSD make does it like this.
+echo '.include "confinc.mk" # ignored' > confmf.BSD
+# Other make implementations (GNU, Solaris 10, AIX) do it like this.
+echo 'include confinc.mk # ignored' > confmf.GNU
+_am_result=no
+for s in GNU BSD; do
+  AM_RUN_LOG([${MAKE-make} -f confmf.$s && cat confinc.out])
+  AS_CASE([$?:`cat confinc.out 2>/dev/null`],
+      ['0:this is the am__doit target'],
+      [AS_CASE([$s],
+          [BSD], [am__include='.include' am__quote='"'],
+          [am__include='include' am__quote=''])])
+  if test "$am__include" != "#"; then
+    _am_result="yes ($s style)"
+    break
+  fi
+done
+rm -f confinc.* confmf.*
+AC_MSG_RESULT([${_am_result}])
+AC_SUBST([am__include])])
+AC_SUBST([am__quote])])
 
 # Fake the existence of programs that GNU maintainers use.  -*- Autoconf -*-
 
-# Copyright (C) 1997-2017 Free Software Foundation, Inc.
+# Copyright (C) 1997-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -735,12 +738,7 @@ AC_DEFUN([AM_MISSING_HAS_RUN],
 [AC_REQUIRE([AM_AUX_DIR_EXPAND])dnl
 AC_REQUIRE_AUX_FILE([missing])dnl
 if test x"${MISSING+set}" != xset; then
-  case $am_aux_dir in
-  *\ * | *\	*)
-    MISSING="\${SHELL} \"$am_aux_dir/missing\"" ;;
-  *)
-    MISSING="\${SHELL} $am_aux_dir/missing" ;;
-  esac
+  MISSING="\${SHELL} '$am_aux_dir/missing'"
 fi
 # Use eval to expand $SHELL
 if eval "$MISSING --is-lightweight"; then
@@ -753,7 +751,7 @@ fi
 
 # Helper functions for option handling.                     -*- Autoconf -*-
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -782,7 +780,7 @@ AC_DEFUN([_AM_SET_OPTIONS],
 AC_DEFUN([_AM_IF_OPTION],
 [m4_ifset(_AM_MANGLE_OPTION([$1]), [$2], [$3])])
 
-# Copyright (C) 1999-2017 Free Software Foundation, Inc.
+# Copyright (C) 1999-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -829,7 +827,7 @@ AC_LANG_POP([C])])
 # For backward compatibility.
 AC_DEFUN_ONCE([AM_PROG_CC_C_O], [AC_REQUIRE([AC_PROG_CC])])
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -848,7 +846,7 @@ AC_DEFUN([AM_RUN_LOG],
 
 # Check to make sure that the build environment is sane.    -*- Autoconf -*-
 
-# Copyright (C) 1996-2017 Free Software Foundation, Inc.
+# Copyright (C) 1996-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -929,7 +927,7 @@ AC_CONFIG_COMMANDS_PRE(
 rm -f conftest.file
 ])
 
-# Copyright (C) 2009-2017 Free Software Foundation, Inc.
+# Copyright (C) 2009-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -989,7 +987,7 @@ AC_SUBST([AM_BACKSLASH])dnl
 _AM_SUBST_NOTMAKE([AM_BACKSLASH])dnl
 ])
 
-# Copyright (C) 2001-2017 Free Software Foundation, Inc.
+# Copyright (C) 2001-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -1017,7 +1015,7 @@ fi
 INSTALL_STRIP_PROGRAM="\$(install_sh) -c -s"
 AC_SUBST([INSTALL_STRIP_PROGRAM])])
 
-# Copyright (C) 2006-2017 Free Software Foundation, Inc.
+# Copyright (C) 2006-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -1036,7 +1034,7 @@ AC_DEFUN([AM_SUBST_NOTMAKE], [_AM_SUBST_NOTMAKE($@)])
 
 # Check how to create a tarball.                            -*- Autoconf -*-
 
-# Copyright (C) 2004-2017 Free Software Foundation, Inc.
+# Copyright (C) 2004-2021 Free Software Foundation, Inc.
 #
 # This file is free software; the Free Software Foundation
 # gives unlimited permission to copy and/or distribute it,
@@ -1167,16 +1165,1076 @@ AC_SUBST([am__tar])
 AC_SUBST([am__untar])
 ]) # _AM_PROG_TAR
 
-m4_include([../config/depstand.m4])
-m4_include([../config/hwcaps.m4])
-m4_include([../config/lead-dot.m4])
-m4_include([../config/lthostflags.m4])
-m4_include([../config/multi.m4])
-m4_include([../config/override.m4])
-m4_include([../config/stdint.m4])
-m4_include([../config/toolexeclibdir.m4])
 m4_include([../ltoptions.m4])
 m4_include([../ltsugar.m4])
 m4_include([../ltversion.m4])
 m4_include([../lt~obsolete.m4])
+
+# Copyright (C) 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2007
+# Free Software Foundation, Inc.
+#
+# This file is free software; the Free Software Foundation
+# gives unlimited permission to copy and/or distribute it,
+# with or without modifications, as long as this notice is preserved.
+
+# serial 8
+
+# Based on depend.m4 from automake 1.9, modified for standalone use in
+# an environment where GNU make is required. 
+
+# ZW_PROG_COMPILER_DEPENDENCIES
+# -----------------------------
+# Variant of _AM_DEPENDENCIES which just does the dependency probe and
+# sets fooDEPMODE accordingly.  Cache-variable compatible with
+# original; not side-effect compatible.  As the users of this macro
+# may require accurate dependencies for correct builds, it does *not*
+# honor --disable-dependency-checking, and failure to detect a usable
+# method is an error.  depcomp is assumed to be located in
+# $ac_aux_dir.
+#
+# FIXME: Should use the Autoconf 2.5x language-selection mechanism.
+
+AC_DEFUN([ZW_PROG_COMPILER_DEPENDENCIES],
+[ifelse([$1], CC,   [depcc="$CC"   am_compiler_list=],
+        [$1], CXX,  [depcc="$CXX"  am_compiler_list=],
+        [$1], OBJC, [depcc="$OBJC" am_compiler_list='gcc3 gcc'],
+        [$1], GCJ,  [depcc="$GCJ"  am_compiler_list='gcc3 gcc'],
+                    [depcc="$$1"   am_compiler_list=])
+
+am_depcomp=$ac_aux_dir/depcomp
+AC_CACHE_CHECK([dependency style of $depcc],
+               [am_cv_$1_dependencies_compiler_type],
+[if test -f "$am_depcomp"; then
+  # We make a subdir and do the tests there.  Otherwise we can end up
+  # making bogus files that we don't know about and never remove.  For
+  # instance it was reported that on HP-UX the gcc test will end up
+  # making a dummy file named `D' -- because `-MD' means `put the output
+  # in D'.
+  mkdir conftest.dir
+  # Copy depcomp to subdir because otherwise we won't find it if we're
+  # using a relative directory.
+  cp "$am_depcomp" conftest.dir
+  cd conftest.dir
+  # We will build objects and dependencies in a subdirectory because
+  # it helps to detect inapplicable dependency modes.  For instance
+  # both Tru64's cc and ICC support -MD to output dependencies as a
+  # side effect of compilation, but ICC will put the dependencies in
+  # the current directory while Tru64 will put them in the object
+  # directory.
+  mkdir sub
+
+  am_cv_$1_dependencies_compiler_type=none
+  if test "$am_compiler_list" = ""; then
+     am_compiler_list=`sed -n ['s/^\([a-zA-Z0-9]*\))$/\1/p'] < ./depcomp`
+  fi
+  for depmode in $am_compiler_list; do
+    if test $depmode = none; then break; fi
+
+    _AS_ECHO([$as_me:$LINENO: trying $depmode], AS_MESSAGE_LOG_FD)
+    # Setup a source with many dependencies, because some compilers
+    # like to wrap large dependency lists on column 80 (with \), and
+    # we should not choose a depcomp mode which is confused by this.
+    #
+    # We need to recreate these files for each test, as the compiler may
+    # overwrite some of them when testing with obscure command lines.
+    # This happens at least with the AIX C compiler.
+    : > sub/conftest.c
+    for i in 1 2 3 4 5 6; do
+      echo '#include "conftst'$i'.h"' >> sub/conftest.c
+      # Using `: > sub/conftst$i.h' creates only sub/conftst1.h with
+      # Solaris 8's {/usr,}/bin/sh.
+      touch sub/conftst$i.h
+    done
+    echo "include sub/conftest.Po" > confmf
+
+    # We check with `-c' and `-o' for the sake of the "dashmstdout"
+    # mode.  It turns out that the SunPro C++ compiler does not properly
+    # handle `-M -o', and we need to detect this.
+    depcmd="depmode=$depmode \
+       source=sub/conftest.c object=sub/conftest.${OBJEXT-o} \
+       depfile=sub/conftest.Po tmpdepfile=sub/conftest.TPo \
+       $SHELL ./depcomp $depcc -c -o sub/conftest.${OBJEXT-o} sub/conftest.c"
+    echo "| $depcmd" | sed -e 's/  */ /g' >&AS_MESSAGE_LOG_FD
+    if env $depcmd > conftest.err 2>&1 &&
+       grep sub/conftst6.h sub/conftest.Po >>conftest.err 2>&1 &&
+       grep sub/conftest.${OBJEXT-o} sub/conftest.Po >>conftest.err 2>&1 &&
+       ${MAKE-make} -s -f confmf >>conftest.err 2>&1; then
+      # icc doesn't choke on unknown options, it will just issue warnings
+      # or remarks (even with -Werror).  So we grep stderr for any message
+      # that says an option was ignored or not supported.
+      # When given -MP, icc 7.0 and 7.1 complain thusly:
+      #   icc: Command line warning: ignoring option '-M'; no argument required
+      # The diagnosis changed in icc 8.0:
+      #   icc: Command line remark: option '-MP' not supported
+      if (grep 'ignoring option' conftest.err ||
+          grep 'not supported' conftest.err) >/dev/null 2>&1; then :; else
+        am_cv_$1_dependencies_compiler_type=$depmode
+	_AS_ECHO([$as_me:$LINENO: success], AS_MESSAGE_LOG_FD)
+        break
+      fi
+    fi
+    _AS_ECHO([$as_me:$LINENO: failure, diagnostics are:], AS_MESSAGE_LOG_FD)
+    sed -e 's/^/| /' < conftest.err >&AS_MESSAGE_LOG_FD
+  done
+
+  cd ..
+  rm -rf conftest.dir
+else
+  am_cv_$1_dependencies_compiler_type=none
+fi
+])
+if test x${am_cv_$1_dependencies_compiler_type-none} = xnone
+then AC_MSG_ERROR([no usable dependency style found])
+else AC_SUBST([$1DEPMODE], [depmode=$am_cv_$1_dependencies_compiler_type])
+fi
+])
+
+# AM_SET_DEPDIR
+# -------------
+# Choose a directory name for dependency files.
+AC_DEFUN([AM_SET_DEPDIR],
+[AC_REQUIRE([AM_SET_LEADING_DOT])dnl
+AC_SUBST([DEPDIR], ["${am__leading_dot}deps"])dnl
+])
+
+# ZW_CREATE_DEPDIR
+# ----------------
+# As AM_SET_DEPDIR, but also create the directory at config.status time.
+AC_DEFUN([ZW_CREATE_DEPDIR],
+[AC_REQUIRE([AM_SET_DEPDIR])dnl
+AC_CONFIG_COMMANDS([depdir], [$SHELL $ac_aux_dir/mkinstalldirs $DEPDIR],
+			     [ac_aux_dir=$ac_aux_dir DEPDIR=$DEPDIR])
+])
+
+dnl
+dnl Check if the assembler used supports disabling generation of hardware
+dnl capabilities.  This is only supported by Solaris as at the moment.
+dnl
+dnl Defines:
+dnl  HWCAP_CFLAGS='-Wa,-nH' if possible.
+dnl
+AC_DEFUN([GCC_CHECK_ASSEMBLER_HWCAP], [
+  test -z "$HWCAP_CFLAGS" && HWCAP_CFLAGS=''
+
+  # Restrict the test to Solaris, other assemblers (e.g. AIX as) have -nH
+  # with a different meaning.
+  case ${target_os} in
+    solaris2*)
+      ac_save_CFLAGS="$CFLAGS"
+      CFLAGS="$CFLAGS -Wa,-nH"
+
+      AC_MSG_CHECKING([for as that supports -Wa,-nH])
+      AC_TRY_COMPILE([], [return 0;], [ac_hwcap_flags=yes],[ac_hwcap_flags=no])
+      if test "$ac_hwcap_flags" = "yes"; then
+	HWCAP_CFLAGS="-Wa,-nH $HWCAP_CFLAGS"
+      fi
+      AC_MSG_RESULT($ac_hwcap_flags)
+
+      CFLAGS="$ac_save_CFLAGS"
+      ;;
+  esac
+
+  AC_SUBST(HWCAP_CFLAGS)
+])
+
+
+dnl
+dnl Check if the linker used supports linker maps to clear hardware
+dnl capabilities.  This is only supported on Solaris at the moment.
+dnl
+dnl Defines:
+dnl  HWCAP_LDFLAGS=-mclear-hwcap if possible
+dnl  LD (as a side effect of testing)
+dnl
+AC_DEFUN([GCC_CHECK_LINKER_HWCAP], [
+  test -z "$HWCAP_LDFLAGS" && HWCAP_LDFLAGS=''
+  AC_REQUIRE([AC_PROG_LD])
+
+  ac_save_LDFLAGS="$LDFLAGS"
+  LDFLAGS="$LFLAGS -mclear-hwcap"
+
+  AC_MSG_CHECKING([for -mclear-hwcap])
+  AC_TRY_LINK([], [return 0;], [ac_hwcap_ldflags=yes],[ac_hwcap_ldflags=no])
+  if test "$ac_hwcap_ldflags" = "yes"; then
+    HWCAP_LDFLAGS="-mclear-hwcap $HWCAP_LDFLAGS"
+  fi
+  AC_MSG_RESULT($ac_hwcap_ldflags)
+
+  LDFLAGS="$ac_save_LDFLAGS"
+
+  AC_SUBST(HWCAP_LDFLAGS)
+
+  AM_CONDITIONAL(HAVE_HWCAP, test $ac_hwcap_ldflags != no)
+])
+
+#                                                          -*- Autoconf -*-
+# Copyright (C) 2003, 2009  Free Software Foundation, Inc.
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3, or (at your option)
+# any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; see the file COPYING3.  If not see
+# <http://www.gnu.org/licenses/>.
+
+# serial 1
+
+# Check whether the underlying file-system supports filenames
+# with a leading dot.  For instance MS-DOS doesn't.
+AC_DEFUN([AM_SET_LEADING_DOT],
+[rm -rf .tst 2>/dev/null
+mkdir .tst 2>/dev/null
+if test -d .tst; then
+  am__leading_dot=.
+else
+  am__leading_dot=_
+fi
+rmdir .tst 2>/dev/null
+AC_SUBST([am__leading_dot])])
+
+dnl Copyright (C) 2010 Free Software Foundation, Inc.
+dnl This file is free software, distributed under the terms of the GNU
+dnl General Public License.  As a special exception to the GNU General
+dnl Public License, this file may be distributed as part of a program
+dnl that contains a configuration script generated by Autoconf, under
+dnl the same distribution terms as the rest of that program.
+
+dnl usage: ACX_LT_HOST_FLAGS([default_flags])
+dnl Defines and AC_SUBSTs lt_host_flags
+
+
+AC_DEFUN([ACX_LT_HOST_FLAGS], [
+AC_REQUIRE([AC_CANONICAL_SYSTEM])
+
+case $host in
+  *-cygwin* | *-mingw*)
+    # 'host' will be top-level target in the case of a target lib,
+    # we must compare to with_cross_host to decide if this is a native
+    # or cross-compiler and select where to install dlls appropriately.
+    if test -n "$with_cross_host" &&
+	test x"$with_cross_host" != x"no"; then
+      lt_host_flags='-no-undefined -bindir "$(toolexeclibdir)"';
+    else
+      lt_host_flags='-no-undefined -bindir "$(bindir)"';
+    fi
+    ;;
+  *)
+    lt_host_flags=[$1]
+    ;;
+esac
+
+AC_SUBST(lt_host_flags)
+])
+
+# Copyright (C) 1998, 1999, 2000, 2001, 2003, 2004, 2005, 2006, 2008
+# Free Software Foundation, Inc.
+#
+# This file is free software; the Free Software Foundation
+# gives unlimited permission to copy and/or distribute it,
+# with or without modifications, as long as this notice is preserved.
+
+# serial 6
+
+# AM_ENABLE_MULTILIB([MAKEFILE], [REL-TO-TOP-SRCDIR])
+# ---------------------------------------------------
+# Add --enable-multilib to configure.
+AC_DEFUN([AM_ENABLE_MULTILIB],
+[# Default to --enable-multilib
+AC_ARG_ENABLE(multilib,
+[  --enable-multilib       build many library versions (default)],
+[case "$enableval" in
+  yes) multilib=yes ;;
+  no)  multilib=no ;;
+  *)   AC_MSG_ERROR([bad value $enableval for multilib option]) ;;
+ esac],
+	      [multilib=yes])
+
+# We may get other options which we leave undocumented:
+# --with-target-subdir, --with-multisrctop, --with-multisubdir
+# See config-ml.in if you want the gory details.
+
+if test "$srcdir" = "."; then
+  if test "$with_target_subdir" != "."; then
+    multi_basedir="$srcdir/$with_multisrctop../$2"
+  else
+    multi_basedir="$srcdir/$with_multisrctop$2"
+  fi
+else
+  multi_basedir="$srcdir/$2"
+fi
+AC_SUBST(multi_basedir)
+
+# Even if the default multilib is not a cross compilation,
+# it may be that some of the other multilibs are.
+if test $cross_compiling = no && test $multilib = yes \
+   && test "x${with_multisubdir}" != x ; then
+   cross_compiling=maybe
+fi
+
+AC_OUTPUT_COMMANDS([
+# Only add multilib support code if we just rebuilt the top-level
+# Makefile.
+case " $CONFIG_FILES " in
+ *" ]m4_default([$1],Makefile)[ "*)
+   ac_file=]m4_default([$1],Makefile)[ . ${multi_basedir}/config-ml.in
+   ;;
+esac],
+		   [
+srcdir="$srcdir"
+host="$host"
+target="$target"
+with_multisubdir="$with_multisubdir"
+with_multisrctop="$with_multisrctop"
+with_target_subdir="$with_target_subdir"
+ac_configure_args="${multilib_arg} ${ac_configure_args}"
+multi_basedir="$multi_basedir"
+CONFIG_SHELL=${CONFIG_SHELL-/bin/sh}
+CC="$CC"
+CXX="$CXX"
+GFORTRAN="$GFORTRAN"
+GDC="$GDC"])])dnl
+
+dnl Fix Autoconf bugs by overriding broken internal Autoconf
+dnl macros with backports of fixes from newer releases.
+dnl
+dnl The override bits of this file should be a no-op for the newest
+dnl Autoconf version, which means they can be removed once the complete
+dnl tree has moved to a new enough Autoconf version.
+dnl
+dnl The _GCC_AUTOCONF_VERSION_TEST ensures that exactly the desired
+dnl Autoconf version is used.  It should be kept for consistency.
+
+dnl Use ifdef/ifelse over m4_ifdef/m4_ifelse to be clean for 2.13.
+ifdef([m4_PACKAGE_VERSION], [
+
+dnl Provide m4_copy_force and m4_rename_force for old Autoconf versions.
+
+m4_ifndef([m4_copy_force],
+[m4_define([m4_copy_force],
+[m4_ifdef([$2], [m4_undefine([$2])])m4_copy($@)])])
+
+m4_ifndef([m4_rename_force],
+[m4_define([m4_rename_force],
+[m4_ifdef([$2], [m4_undefine([$2])])m4_rename($@)])])
+
+dnl AC_DEFUN a commonly used macro so this file is picked up.
+m4_copy([AC_PREREQ], [_AC_PREREQ])
+AC_DEFUN([AC_PREREQ], [frob])
+m4_copy_force([_AC_PREREQ], [AC_PREREQ])
+
+
+dnl Ensure exactly this Autoconf version is used
+m4_ifndef([_GCC_AUTOCONF_VERSION],
+  [m4_define([_GCC_AUTOCONF_VERSION], [2.69])])
+
+dnl Test for the exact version when AC_INIT is expanded.
+dnl This allows to update the tree in steps (for testing)
+dnl by putting
+dnl   m4_define([_GCC_AUTOCONF_VERSION], [X.Y])
+dnl in configure.ac before AC_INIT,
+dnl without rewriting this file.
+dnl Or for updating the whole tree at once with the definition above.
+AC_DEFUN([_GCC_AUTOCONF_VERSION_CHECK],
+[m4_if(m4_defn([_GCC_AUTOCONF_VERSION]),
+  m4_defn([m4_PACKAGE_VERSION]), [],
+  [m4_fatal([Please use exactly Autoconf ]_GCC_AUTOCONF_VERSION[ instead of ]m4_defn([m4_PACKAGE_VERSION])[.])])
+])
+m4_define([AC_INIT], m4_defn([AC_INIT])[
+_GCC_AUTOCONF_VERSION_CHECK
+])
+
+
+dnl Ensure we do not use a buggy M4.
+m4_if(m4_index([..wi.d.], [.d.]), [-1],
+  [m4_fatal(m4_do([m4 with buggy strstr detected.  Please install
+GNU M4 1.4.16 or newer and set the M4 environment variable]))])
+
+
+dnl Fix 2.64 cross compile detection for AVR and RTEMS
+dnl by not trying to compile fopen.
+m4_if(m4_defn([m4_PACKAGE_VERSION]), [2.64],
+  [m4_foreach([_GCC_LANG], [C, C++, Fortran, Fortran 77],
+     [m4_define([_AC_LANG_IO_PROGRAM(]_GCC_LANG[)], m4_defn([AC_LANG_PROGRAM(]_GCC_LANG[)]))])])
+
+m4_version_prereq([2.66],, [
+dnl We need AC_CHECK_DECL which works for overloaded C++ functions.
+
+# _AC_CHECK_DECL_BODY
+# -------------------
+# Shell function body for AC_CHECK_DECL.
+m4_define([_AC_CHECK_DECL_BODY],
+[  AS_LINENO_PUSH([$[]1])
+  [as_decl_name=`echo $][2|sed 's/ *(.*//'`]
+  [as_decl_use=`echo $][2|sed -e 's/(/((/' -e 's/)/) 0&/' -e 's/,/) 0& (/g'`]
+  AC_CACHE_CHECK([whether $as_decl_name is declared], [$[]3],
+  [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([$[]4],
+[@%:@ifndef $[]as_decl_name
+@%:@ifdef __cplusplus
+  (void) $[]as_decl_use;
+@%:@else
+  (void) $[]as_decl_name;
+@%:@endif
+@%:@endif
+])],
+		   [AS_VAR_SET([$[]3], [yes])],
+		   [AS_VAR_SET([$[]3], [no])])])
+  AS_LINENO_POP
+])# _AC_CHECK_DECL_BODY
+
+# _AC_CHECK_DECLS(SYMBOL, ACTION-IF_FOUND, ACTION-IF-NOT-FOUND,
+#                 INCLUDES)
+# -------------------------------------------------------------
+# Helper to AC_CHECK_DECLS, which generates the check for a single
+# SYMBOL with INCLUDES, performs the AC_DEFINE, then expands
+# ACTION-IF-FOUND or ACTION-IF-NOT-FOUND.
+m4_define([_AC_CHECK_DECLS],
+[AC_CHECK_DECL([$1], [ac_have_decl=1], [ac_have_decl=0], [$4])]dnl
+[AC_DEFINE_UNQUOTED(AS_TR_CPP(m4_bpatsubst(HAVE_DECL_[$1],[ *(.*])),
+  [$ac_have_decl],
+  [Define to 1 if you have the declaration of `$1',
+   and to 0 if you don't.])]dnl
+[m4_ifvaln([$2$3], [AS_IF([test $ac_have_decl = 1], [$2], [$3])])])
+
+])
+
+dnl If flex/lex are not found, the top level configure sets LEX to
+dnl "/path_to/missing flex".  When AC_PROG_LEX tries to find the flex
+dnl output file, it calls $LEX to do so, but the current lightweight
+dnl "missing" won't create a file.  This results in an error.
+dnl Avoid calling the bulk of AC_PROG_LEX when $LEX is "missing".
+AC_DEFUN_ONCE([AC_PROG_LEX],
+[AC_CHECK_PROGS(LEX, flex lex, :)
+case "$LEX" in
+  :|*"missing "*) ;;
+  *) _AC_PROG_LEX_YYTEXT_DECL ;;
+esac])
+
+])
+
+AC_DEFUN([GCC_STDINT_TYPES],
+[AC_REQUIRE([AC_TYPE_INT8_T])
+AC_REQUIRE([AC_TYPE_INT16_T])
+AC_REQUIRE([AC_TYPE_INT32_T])
+AC_REQUIRE([AC_TYPE_INT64_T])
+AC_REQUIRE([AC_TYPE_INTMAX_T])
+AC_REQUIRE([AC_TYPE_INTPTR_T])
+AC_REQUIRE([AC_TYPE_UINT8_T])
+AC_REQUIRE([AC_TYPE_UINT16_T])
+AC_REQUIRE([AC_TYPE_UINT32_T])
+AC_REQUIRE([AC_TYPE_UINT64_T])
+AC_REQUIRE([AC_TYPE_UINTMAX_T])
+AC_REQUIRE([AC_TYPE_UINTPTR_T])])
+
+dnl @synopsis GCC_HEADER_STDINT [( HEADER-TO-GENERATE [, HEADERS-TO-CHECK])]
+dnl
+dnl the "ISO C9X: 7.18 Integer types <stdint.h>" section requires the
+dnl existence of an include file <stdint.h> that defines a set of
+dnl typedefs, especially uint8_t,int32_t,uintptr_t.
+dnl Many older installations will not provide this file, but some will
+dnl have the very same definitions in <inttypes.h>. In other environments
+dnl we can use the inet-types in <sys/types.h> which would define the
+dnl typedefs int8_t and u_int8_t respectivly.
+dnl
+dnl This macros will create a local "_stdint.h" or the headerfile given as
+dnl an argument. In many cases that file will pick the definition from a
+dnl "#include <stdint.h>" or "#include <inttypes.h>" statement, while
+dnl in other environments it will provide the set of basic 'stdint's defined:
+dnl int8_t,uint8_t,int16_t,uint16_t,int32_t,uint32_t,intptr_t,uintptr_t
+dnl int_least32_t.. int_fast32_t.. intmax_t
+dnl which may or may not rely on the definitions of other files.
+dnl
+dnl Sometimes the stdint.h or inttypes.h headers conflict with sys/types.h,
+dnl so we test the headers together with sys/types.h and always include it
+dnl into the generated header (to match the tests with the generated file).
+dnl Hopefully this is not a big annoyance.
+dnl
+dnl If your installed header files require the stdint-types you will want to
+dnl create an installable file mylib-int.h that all your other installable
+dnl header may include. So, for a library package named "mylib", just use
+dnl      GCC_HEADER_STDINT(mylib-int.h)
+dnl in configure.ac and install that header file in Makefile.am along with
+dnl the other headers (mylib.h).  The mylib-specific headers can simply
+dnl use "#include <mylib-int.h>" to obtain the stdint-types.
+dnl
+dnl Remember, if the system already had a valid <stdint.h>, the generated
+dnl file will include it directly. No need for fuzzy HAVE_STDINT_H things...
+dnl
+dnl @author  Guido Draheim <guidod@gmx.de>, Paolo Bonzini <bonzini@gnu.org>
+
+AC_DEFUN([GCC_HEADER_STDINT],
+[m4_define(_GCC_STDINT_H, m4_ifval($1, $1, _stdint.h))
+
+inttype_headers=`echo inttypes.h sys/inttypes.h $2 | sed -e 's/,/ /g'`
+
+acx_cv_header_stdint=stddef.h
+acx_cv_header_stdint_kind="(already complete)"
+for i in stdint.h $inttype_headers; do
+  unset ac_cv_type_uintptr_t
+  unset ac_cv_type_uintmax_t
+  unset ac_cv_type_int_least32_t
+  unset ac_cv_type_int_fast32_t
+  unset ac_cv_type_uint64_t
+  _AS_ECHO_N([looking for a compliant stdint.h in $i, ])
+  AC_CHECK_TYPE(uintmax_t,[acx_cv_header_stdint=$i],continue,[#include <sys/types.h>
+#include <$i>])
+  AC_CHECK_TYPE(uintptr_t,,[acx_cv_header_stdint_kind="(mostly complete)"], [#include <sys/types.h>
+#include <$i>])
+  AC_CHECK_TYPE(int_least32_t,,[acx_cv_header_stdint_kind="(mostly complete)"], [#include <sys/types.h>
+#include <$i>])
+  AC_CHECK_TYPE(int_fast32_t,,[acx_cv_header_stdint_kind="(mostly complete)"], [#include <sys/types.h>
+#include <$i>])
+  AC_CHECK_TYPE(uint64_t,,[acx_cv_header_stdint_kind="(lacks uint64_t)"], [#include <sys/types.h>
+#include <$i>])
+  break
+done
+if test "$acx_cv_header_stdint" = stddef.h; then
+  acx_cv_header_stdint_kind="(lacks uintmax_t)"
+  for i in stdint.h $inttype_headers; do
+    unset ac_cv_type_uintptr_t
+    unset ac_cv_type_uint32_t
+    unset ac_cv_type_uint64_t
+    _AS_ECHO_N([looking for an incomplete stdint.h in $i, ])
+    AC_CHECK_TYPE(uint32_t,[acx_cv_header_stdint=$i],continue,[#include <sys/types.h>
+#include <$i>])
+    AC_CHECK_TYPE(uint64_t,,,[#include <sys/types.h>
+#include <$i>])
+    AC_CHECK_TYPE(uintptr_t,,,[#include <sys/types.h>
+#include <$i>])
+    break
+  done
+fi
+if test "$acx_cv_header_stdint" = stddef.h; then
+  acx_cv_header_stdint_kind="(u_intXX_t style)"
+  for i in sys/types.h $inttype_headers; do
+    unset ac_cv_type_u_int32_t
+    unset ac_cv_type_u_int64_t
+    _AS_ECHO_N([looking for u_intXX_t types in $i, ])
+    AC_CHECK_TYPE(u_int32_t,[acx_cv_header_stdint=$i],continue,[#include <sys/types.h>
+#include <$i>])
+    AC_CHECK_TYPE(u_int64_t,,,[#include <sys/types.h>
+#include <$i>])
+    break
+  done
+fi
+if test "$acx_cv_header_stdint" = stddef.h; then
+  acx_cv_header_stdint_kind="(using manual detection)"
+fi
+
+test -z "$ac_cv_type_uintptr_t" && ac_cv_type_uintptr_t=no
+test -z "$ac_cv_type_uint64_t" && ac_cv_type_uint64_t=no
+test -z "$ac_cv_type_u_int64_t" && ac_cv_type_u_int64_t=no
+test -z "$ac_cv_type_int_least32_t" && ac_cv_type_int_least32_t=no
+test -z "$ac_cv_type_int_fast32_t" && ac_cv_type_int_fast32_t=no
+
+# ----------------- Summarize what we found so far
+
+AC_MSG_CHECKING([what to include in _GCC_STDINT_H])
+
+case `AS_BASENAME(_GCC_STDINT_H)` in
+  stdint.h) AC_MSG_WARN([are you sure you want it there?]) ;;
+  inttypes.h) AC_MSG_WARN([are you sure you want it there?]) ;;
+  *) ;;
+esac
+
+AC_MSG_RESULT($acx_cv_header_stdint $acx_cv_header_stdint_kind)
+
+# ----------------- done included file, check C basic types --------
+
+# Lacking an uintptr_t?  Test size of void *
+case "$acx_cv_header_stdint:$ac_cv_type_uintptr_t" in
+  stddef.h:* | *:no) AC_CHECK_SIZEOF(void *) ;;
+esac
+
+# Lacking an uint64_t?  Test size of long
+case "$acx_cv_header_stdint:$ac_cv_type_uint64_t:$ac_cv_type_u_int64_t" in
+  stddef.h:*:* | *:no:no) AC_CHECK_SIZEOF(long) ;;
+esac
+
+if test $acx_cv_header_stdint = stddef.h; then
+  # Lacking a good header?  Test size of everything and deduce all types.
+  AC_CHECK_SIZEOF(int)
+  AC_CHECK_SIZEOF(short)
+  AC_CHECK_SIZEOF(char)
+
+  AC_MSG_CHECKING(for type equivalent to int8_t)
+  case "$ac_cv_sizeof_char" in
+    1) acx_cv_type_int8_t=char ;;
+    *) AC_MSG_ERROR([no 8-bit type, please report a bug])
+  esac
+  AC_MSG_RESULT($acx_cv_type_int8_t)
+
+  AC_MSG_CHECKING(for type equivalent to int16_t)
+  case "$ac_cv_sizeof_int:$ac_cv_sizeof_short" in
+    2:*) acx_cv_type_int16_t=int ;;
+    *:2) acx_cv_type_int16_t=short ;;
+    *) AC_MSG_ERROR([no 16-bit type, please report a bug])
+  esac
+  AC_MSG_RESULT($acx_cv_type_int16_t)
+
+  AC_MSG_CHECKING(for type equivalent to int32_t)
+  case "$ac_cv_sizeof_int:$ac_cv_sizeof_long" in
+    4:*) acx_cv_type_int32_t=int ;;
+    *:4) acx_cv_type_int32_t=long ;;
+    *) AC_MSG_ERROR([no 32-bit type, please report a bug])
+  esac
+  AC_MSG_RESULT($acx_cv_type_int32_t)
+fi
+
+# These tests are here to make the output prettier
+
+if test "$ac_cv_type_uint64_t" != yes && test "$ac_cv_type_u_int64_t" != yes; then
+  case "$ac_cv_sizeof_long" in
+    8) acx_cv_type_int64_t=long ;;
+  esac
+  AC_MSG_CHECKING(for type equivalent to int64_t)
+  AC_MSG_RESULT(${acx_cv_type_int64_t-'using preprocessor symbols'})
+fi
+
+# Now we can use the above types
+
+if test "$ac_cv_type_uintptr_t" != yes; then
+  AC_MSG_CHECKING(for type equivalent to intptr_t)
+  case $ac_cv_sizeof_void_p in
+    2) acx_cv_type_intptr_t=int16_t ;;
+    4) acx_cv_type_intptr_t=int32_t ;;
+    8) acx_cv_type_intptr_t=int64_t ;;
+    *) AC_MSG_ERROR([no equivalent for intptr_t, please report a bug])
+  esac
+  AC_MSG_RESULT($acx_cv_type_intptr_t)
+fi
+
+# ----------------- done all checks, emit header -------------
+AC_CONFIG_COMMANDS(_GCC_STDINT_H, [
+if test "$GCC" = yes; then
+  echo "/* generated for " `$CC --version | sed 1q` "*/" > tmp-stdint.h
+else
+  echo "/* generated for $CC */" > tmp-stdint.h
+fi
+
+sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+  #ifndef GCC_GENERATED_STDINT_H
+  #define GCC_GENERATED_STDINT_H 1
+
+  #include <sys/types.h>
+EOF
+
+if test "$acx_cv_header_stdint" != stdint.h; then
+  echo "#include <stddef.h>" >> tmp-stdint.h
+fi
+if test "$acx_cv_header_stdint" != stddef.h; then
+  echo "#include <$acx_cv_header_stdint>" >> tmp-stdint.h
+fi
+
+sed 's/^ *//' >> tmp-stdint.h <<EOF
+  /* glibc uses these symbols as guards to prevent redefinitions.  */
+  #ifdef __int8_t_defined
+  #define _INT8_T
+  #define _INT16_T
+  #define _INT32_T
+  #endif
+  #ifdef __uint32_t_defined
+  #define _UINT32_T
+  #endif
+
+EOF
+
+# ----------------- done header, emit basic int types -------------
+if test "$acx_cv_header_stdint" = stddef.h; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    #ifndef _UINT8_T
+    #define _UINT8_T
+    #ifndef __uint8_t_defined
+    #define __uint8_t_defined
+    #ifndef uint8_t
+    typedef unsigned $acx_cv_type_int8_t uint8_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _UINT16_T
+    #define _UINT16_T
+    #ifndef __uint16_t_defined
+    #define __uint16_t_defined
+    #ifndef uint16_t
+    typedef unsigned $acx_cv_type_int16_t uint16_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _UINT32_T
+    #define _UINT32_T
+    #ifndef __uint32_t_defined
+    #define __uint32_t_defined
+    #ifndef uint32_t
+    typedef unsigned $acx_cv_type_int32_t uint32_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _INT8_T
+    #define _INT8_T
+    #ifndef __int8_t_defined
+    #define __int8_t_defined
+    #ifndef int8_t
+    typedef $acx_cv_type_int8_t int8_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _INT16_T
+    #define _INT16_T
+    #ifndef __int16_t_defined
+    #define __int16_t_defined
+    #ifndef int16_t
+    typedef $acx_cv_type_int16_t int16_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _INT32_T
+    #define _INT32_T
+    #ifndef __int32_t_defined
+    #define __int32_t_defined
+    #ifndef int32_t
+    typedef $acx_cv_type_int32_t int32_t;
+    #endif
+    #endif
+    #endif
+EOF
+elif test "$ac_cv_type_u_int32_t" = yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* int8_t int16_t int32_t defined by inet code, we do the u_intXX types */
+    #ifndef _INT8_T
+    #define _INT8_T
+    #endif
+    #ifndef _INT16_T
+    #define _INT16_T
+    #endif
+    #ifndef _INT32_T
+    #define _INT32_T
+    #endif
+
+    #ifndef _UINT8_T
+    #define _UINT8_T
+    #ifndef __uint8_t_defined
+    #define __uint8_t_defined
+    #ifndef uint8_t
+    typedef u_int8_t uint8_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _UINT16_T
+    #define _UINT16_T
+    #ifndef __uint16_t_defined
+    #define __uint16_t_defined
+    #ifndef uint16_t
+    typedef u_int16_t uint16_t;
+    #endif
+    #endif
+    #endif
+
+    #ifndef _UINT32_T
+    #define _UINT32_T
+    #ifndef __uint32_t_defined
+    #define __uint32_t_defined
+    #ifndef uint32_t
+    typedef u_int32_t uint32_t;
+    #endif
+    #endif
+    #endif
+EOF
+else
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* Some systems have guard macros to prevent redefinitions, define them.  */
+    #ifndef _INT8_T
+    #define _INT8_T
+    #endif
+    #ifndef _INT16_T
+    #define _INT16_T
+    #endif
+    #ifndef _INT32_T
+    #define _INT32_T
+    #endif
+    #ifndef _UINT8_T
+    #define _UINT8_T
+    #endif
+    #ifndef _UINT16_T
+    #define _UINT16_T
+    #endif
+    #ifndef _UINT32_T
+    #define _UINT32_T
+    #endif
+EOF
+fi
+
+# ------------- done basic int types, emit int64_t types ------------
+if test "$ac_cv_type_uint64_t" = yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* system headers have good uint64_t and int64_t */
+    #ifndef _INT64_T
+    #define _INT64_T
+    #endif
+    #ifndef _UINT64_T
+    #define _UINT64_T
+    #endif
+EOF
+elif test "$ac_cv_type_u_int64_t" = yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* system headers have an u_int64_t (and int64_t) */
+    #ifndef _INT64_T
+    #define _INT64_T
+    #endif
+    #ifndef _UINT64_T
+    #define _UINT64_T
+    #ifndef __uint64_t_defined
+    #define __uint64_t_defined
+    #ifndef uint64_t
+    typedef u_int64_t uint64_t;
+    #endif
+    #endif
+    #endif
+EOF
+elif test -n "$acx_cv_type_int64_t"; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* architecture has a 64-bit type, $acx_cv_type_int64_t */
+    #ifndef _INT64_T
+    #define _INT64_T
+    #ifndef int64_t
+    typedef $acx_cv_type_int64_t int64_t;
+    #endif
+    #endif
+    #ifndef _UINT64_T
+    #define _UINT64_T
+    #ifndef __uint64_t_defined
+    #define __uint64_t_defined
+    #ifndef uint64_t
+    typedef unsigned $acx_cv_type_int64_t uint64_t;
+    #endif
+    #endif
+    #endif
+EOF
+else
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* some common heuristics for int64_t, using compiler-specific tests */
+    #if defined __STDC_VERSION__ && (__STDC_VERSION__-0) >= 199901L
+    #ifndef _INT64_T
+    #define _INT64_T
+    #ifndef __int64_t_defined
+    #ifndef int64_t
+    typedef long long int64_t;
+    #endif
+    #endif
+    #endif
+    #ifndef _UINT64_T
+    #define _UINT64_T
+    #ifndef uint64_t
+    typedef unsigned long long uint64_t;
+    #endif
+    #endif
+
+    #elif defined __GNUC__ && defined (__STDC__) && __STDC__-0
+    /* NextStep 2.0 cc is really gcc 1.93 but it defines __GNUC__ = 2 and
+       does not implement __extension__.  But that compiler doesn't define
+       __GNUC_MINOR__.  */
+    # if __GNUC__ < 2 || (__NeXT__ && !__GNUC_MINOR__)
+    # define __extension__
+    # endif
+
+    # ifndef _INT64_T
+    # define _INT64_T
+    # ifndef int64_t
+    __extension__ typedef long long int64_t;
+    # endif
+    # endif
+    # ifndef _UINT64_T
+    # define _UINT64_T
+    # ifndef uint64_t
+    __extension__ typedef unsigned long long uint64_t;
+    # endif
+    # endif
+
+    #elif !defined __STRICT_ANSI__
+    # if defined _MSC_VER || defined __WATCOMC__ || defined __BORLANDC__
+
+    #  ifndef _INT64_T
+    #  define _INT64_T
+    #  ifndef int64_t
+    typedef __int64 int64_t;
+    #  endif
+    #  endif
+    #  ifndef _UINT64_T
+    #  define _UINT64_T
+    #  ifndef uint64_t
+    typedef unsigned __int64 uint64_t;
+    #  endif
+    #  endif
+    # endif /* compiler */
+
+    #endif /* ANSI version */
+EOF
+fi
+
+# ------------- done int64_t types, emit intptr types ------------
+if test "$ac_cv_type_uintptr_t" != yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* Define intptr_t based on sizeof(void*) = $ac_cv_sizeof_void_p */
+    #ifndef __uintptr_t_defined
+    #ifndef uintptr_t
+    typedef u$acx_cv_type_intptr_t uintptr_t;
+    #endif
+    #endif
+    #ifndef __intptr_t_defined
+    #ifndef intptr_t
+    typedef $acx_cv_type_intptr_t  intptr_t;
+    #endif
+    #endif
+EOF
+fi
+
+# ------------- done intptr types, emit int_least types ------------
+if test "$ac_cv_type_int_least32_t" != yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* Define int_least types */
+    typedef int8_t     int_least8_t;
+    typedef int16_t    int_least16_t;
+    typedef int32_t    int_least32_t;
+    #ifdef _INT64_T
+    typedef int64_t    int_least64_t;
+    #endif
+
+    typedef uint8_t    uint_least8_t;
+    typedef uint16_t   uint_least16_t;
+    typedef uint32_t   uint_least32_t;
+    #ifdef _UINT64_T
+    typedef uint64_t   uint_least64_t;
+    #endif
+EOF
+fi
+
+# ------------- done intptr types, emit int_fast types ------------
+if test "$ac_cv_type_int_fast32_t" != yes; then
+  dnl NOTE: The following code assumes that sizeof (int) > 1.
+  dnl Fix when strange machines are reported.
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* Define int_fast types.  short is often slow */
+    typedef int8_t       int_fast8_t;
+    typedef int          int_fast16_t;
+    typedef int32_t      int_fast32_t;
+    #ifdef _INT64_T
+    typedef int64_t      int_fast64_t;
+    #endif
+
+    typedef uint8_t      uint_fast8_t;
+    typedef unsigned int uint_fast16_t;
+    typedef uint32_t     uint_fast32_t;
+    #ifdef _UINT64_T
+    typedef uint64_t     uint_fast64_t;
+    #endif
+EOF
+fi
+
+if test "$ac_cv_type_uintmax_t" != yes; then
+  sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+    /* Define intmax based on what we found */
+    #ifndef intmax_t
+    #ifdef _INT64_T
+    typedef int64_t       intmax_t;
+    #else
+    typedef long          intmax_t;
+    #endif
+    #endif
+    #ifndef uintmax_t
+    #ifdef _UINT64_T
+    typedef uint64_t      uintmax_t;
+    #else
+    typedef unsigned long uintmax_t;
+    #endif
+    #endif
+EOF
+fi
+
+sed 's/^ *//' >> tmp-stdint.h <<EOF
+
+  #endif /* GCC_GENERATED_STDINT_H */
+EOF
+
+if test -r ]_GCC_STDINT_H[ && cmp -s tmp-stdint.h ]_GCC_STDINT_H[; then
+  rm -f tmp-stdint.h
+else
+  mv -f tmp-stdint.h ]_GCC_STDINT_H[
+fi
+
+], [
+GCC="$GCC"
+CC="$CC"
+acx_cv_header_stdint="$acx_cv_header_stdint"
+acx_cv_type_int8_t="$acx_cv_type_int8_t"
+acx_cv_type_int16_t="$acx_cv_type_int16_t"
+acx_cv_type_int32_t="$acx_cv_type_int32_t"
+acx_cv_type_int64_t="$acx_cv_type_int64_t"
+acx_cv_type_intptr_t="$acx_cv_type_intptr_t"
+ac_cv_type_uintmax_t="$ac_cv_type_uintmax_t"
+ac_cv_type_uintptr_t="$ac_cv_type_uintptr_t"
+ac_cv_type_uint64_t="$ac_cv_type_uint64_t"
+ac_cv_type_u_int64_t="$ac_cv_type_u_int64_t"
+ac_cv_type_u_int32_t="$ac_cv_type_u_int32_t"
+ac_cv_type_int_least32_t="$ac_cv_type_int_least32_t"
+ac_cv_type_int_fast32_t="$ac_cv_type_int_fast32_t"
+ac_cv_sizeof_void_p="$ac_cv_sizeof_void_p"
+])
+
+])
+
+dnl toolexeclibdir override support.
+dnl Copyright (C) 2020  Free Software Foundation, Inc.
+dnl
+dnl This program is free software; you can redistribute it and/or modify
+dnl it under the terms of the GNU General Public License as published by
+dnl the Free Software Foundation; either version 3, or (at your option)
+dnl any later version.
+dnl
+dnl This program is distributed in the hope that it will be useful,
+dnl but WITHOUT ANY WARRANTY; without even the implied warranty of
+dnl MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+dnl GNU General Public License for more details.
+dnl
+dnl You should have received a copy of the GNU General Public License
+dnl along with this program; see the file COPYING3.  If not see
+dnl <http://www.gnu.org/licenses/>.
+
+AC_DEFUN([GCC_WITH_TOOLEXECLIBDIR],
+[AC_ARG_WITH(toolexeclibdir,
+  [AS_HELP_STRING([--with-toolexeclibdir=DIR],
+		  [install libraries built with a cross compiler within DIR])],
+  [dnl
+case ${with_toolexeclibdir} in
+  /)
+    ;;
+  */)
+    with_toolexeclibdir=`echo $with_toolexeclibdir | sed 's,/$,,'`
+    ;;
+esac],
+  [with_toolexeclibdir=no])
+])
+
 m4_include([acinclude.m4])

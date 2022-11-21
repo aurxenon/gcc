@@ -2205,7 +2205,7 @@ AC_DEFUN([GLIBCXX_CHECK_MATH11_PROTO], [
   CXXFLAGS="$CXXFLAGS -std=c++11"
 
   case "$host" in
-    *-*-solaris2.*)
+    *-*-solaris2.11)
       # Solaris 12 Build 86, Solaris 11.3 SRU 3.6, and Solaris 10 Patch
       # 11996[67]-02 introduced the C++11 <math.h> floating point overloads.
       AC_CACHE_CHECK([for C++11 <math.h> floating point overloads],
