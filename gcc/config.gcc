@@ -1208,6 +1208,11 @@ aarch64*-wrs-vxworks*)
         tm_file="${tm_file} vx-common.h vxworks.h aarch64/aarch64-vxworks.h"
         tmake_file="${tmake_file} aarch64/t-aarch64 aarch64/t-aarch64-vxworks"
         ;;
+alpha*-*-elf*)
+	tm_file="elfos.h ${tm_file} alpha/elf.h newlib-stdint.h"
+	tmake_file="${tmake_file} alpha/t-alpha"
+	extra_options="${extra_options} alpha/elf.opt"
+	;;
 alpha*-*-linux*)
 	tm_file="elfos.h ${tm_file} alpha/elf.h alpha/linux.h alpha/linux-elf.h glibc-stdint.h"
 	tmake_file="${tmake_file} alpha/t-linux alpha/t-alpha"

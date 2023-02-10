@@ -414,6 +414,10 @@ aarch64*-*-vxworks7*)
 	tmake_file="${tmake_file} ${cpu_type}/t-softfp t-softfp t-crtfm"
 	tmake_file="${tmake_file} t-dfprules"
 	;;
+alpha*-*-elf*)
+	tmake_file="$tmake_file alpha/t-alpha alpha/t-ieee"
+	extra_parts="$extra_parts crti.o crtn.o"
+	;;
 alpha*-*-linux*)
 	tmake_file="${tmake_file} alpha/t-alpha alpha/t-ieee t-crtfm alpha/t-linux"
 	extra_parts="$extra_parts crtfastmath.o"
