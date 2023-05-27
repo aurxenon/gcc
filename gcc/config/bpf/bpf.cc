@@ -258,7 +258,7 @@ bpf_option_override (void)
     {
       inform (input_location,
               "%<-fstack-protector%> does not work "
-              " on this architecture");
+	      "on this architecture");
       flag_stack_protect = 0;
     }
 }
@@ -1406,7 +1406,7 @@ bpf_core_compute (tree node, vec<unsigned int> *accessors)
   if (TREE_CODE (node) == ADDR_EXPR)
     node = TREE_OPERAND (node, 0);
 
-  else if (TREE_CODE (node) == INDIRECT_REF
+  else if (INDIRECT_REF_P (node)
 	   || TREE_CODE (node) == POINTER_PLUS_EXPR)
     {
       accessors->safe_push (0);

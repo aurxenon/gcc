@@ -121,7 +121,9 @@ ASM_MISA_SPEC
 
 /* The mapping from gcc register number to DWARF 2 CFA column number.  */
 #define DWARF_FRAME_REGNUM(REGNO)                                              \
-  (VL_REG_P (REGNO) ? RISCV_DWARF_VL                                           \
+  (FRM_REG_P (REGNO)	? RISCV_DWARF_FRM                                      \
+   : VXRM_REG_P (REGNO) ? RISCV_DWARF_VXRM                                     \
+   : VL_REG_P (REGNO)	? RISCV_DWARF_VL                                       \
    : VTYPE_REG_P (REGNO)                                                       \
      ? RISCV_DWARF_VTYPE                                                       \
      : (GP_REG_P (REGNO) || FP_REG_P (REGNO) || V_REG_P (REGNO)                \
@@ -312,7 +314,7 @@ ASM_MISA_SPEC
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
   /* Others.  */							\
-  1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
   /* Vector registers.  */						\
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
@@ -372,6 +374,8 @@ ASM_MISA_SPEC
   ((unsigned int) ((int) (REGNO) - V_REG_FIRST) < V_REG_NUM)
 #define VL_REG_P(REGNO) ((REGNO) == VL_REGNUM)
 #define VTYPE_REG_P(REGNO) ((REGNO) == VTYPE_REGNUM)
+#define VXRM_REG_P(REGNO) ((REGNO) == VXRM_REGNUM)
+#define FRM_REG_P(REGNO) ((REGNO) == FRM_REGNUM)
 
 /* True when REGNO is in SIBCALL_REGS set.  */
 #define SIBCALL_REG_P(REGNO)	\
@@ -390,6 +394,8 @@ ASM_MISA_SPEC
 #define FRAME_POINTER_REGNUM 65
 
 /* Define Dwarf for RVV.  */
+#define RISCV_DWARF_FRM (4096 + 0x003)
+#define RISCV_DWARF_VXRM (4096 + 0x00a)
 #define RISCV_DWARF_VL (4096 + 0xc20)
 #define RISCV_DWARF_VTYPE (4096 + 0xc21)
 #define RISCV_DWARF_VLENB (4096 + 0xc22)
@@ -462,8 +468,6 @@ enum reg_class
   GR_REGS,			/* integer registers */
   FP_REGS,			/* floating-point registers */
   FRAME_REGS,			/* arg pointer and frame pointer */
-  VL_REGS,			/* vl register */
-  VTYPE_REGS,			/* vtype register */
   VM_REGS,			/* v0.t registers */
   VD_REGS,			/* vector registers except v0.t */
   V_REGS,			/* vector registers */
@@ -487,8 +491,6 @@ enum reg_class
   "GR_REGS",								\
   "FP_REGS",								\
   "FRAME_REGS",								\
-  "VL_REGS",								\
-  "VTYPE_REGS",								\
   "VM_REGS",								\
   "VD_REGS",								\
   "V_REGS",								\
@@ -514,12 +516,10 @@ enum reg_class
   { 0xffffffff, 0x00000000, 0x00000000, 0x00000000 },	/* GR_REGS */		\
   { 0x00000000, 0xffffffff, 0x00000000, 0x00000000 },	/* FP_REGS */		\
   { 0x00000000, 0x00000000, 0x00000003, 0x00000000 },	/* FRAME_REGS */	\
-  { 0x00000000, 0x00000000, 0x00000004, 0x00000000 },	/* VL_REGS */		\
-  { 0x00000000, 0x00000000, 0x00000008, 0x00000000 },	/* VTYPE_REGS */	\
   { 0x00000000, 0x00000000, 0x00000000, 0x00000001 },	/* V0_REGS */		\
   { 0x00000000, 0x00000000, 0x00000000, 0xfffffffe },	/* VNoV0_REGS */	\
   { 0x00000000, 0x00000000, 0x00000000, 0xffffffff },	/* V_REGS */		\
-  { 0xffffffff, 0xffffffff, 0x0000000f, 0xffffffff }	/* ALL_REGS */		\
+  { 0xffffffff, 0xffffffff, 0x00000003, 0xffffffff }	/* ALL_REGS */		\
 }
 
 /* A C expression whose value is a register class containing hard
@@ -559,13 +559,12 @@ enum reg_class
   60, 61, 62, 63,							\
   /* Call-saved FPRs.  */						\
   40, 41, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,			\
-  /* V24 ~ V31.  */							\
-  120, 121, 122, 123, 124, 125, 126, 127,				\
-  /* V8 ~ V23.  */							\
-  104, 105, 106, 107, 108, 109, 110, 111,				\
-  112, 113, 114, 115, 116, 117, 118, 119,				\
-  /* V0 ~ V7.  */							\
-  96, 97, 98, 99, 100, 101, 102, 103,					\
+  /* v1 ~ v31 vector registers.  */					\
+  97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110,	\
+  111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123,	\
+  124, 125, 126, 127,							\
+  /* The vector mask register.  */					\
+  96,									\
   /* None of the remaining classes have defined call-saved		\
      registers.  */							\
   64, 65, 66, 67							\
@@ -579,7 +578,7 @@ enum reg_class
 #define POLY_SMALL_OPERAND_P(POLY_VALUE)		\
   (POLY_VALUE.is_constant () ?				\
      SMALL_OPERAND (POLY_VALUE.to_constant ()) : false)
-     
+
 /* True if VALUE can be loaded into a register using LUI.  */
 
 #define LUI_OPERAND(VALUE)						\
@@ -650,9 +649,6 @@ enum reg_class
 #define GP_TEMP_FIRST (GP_REG_FIRST + 5)
 #define FP_ARG_FIRST (FP_REG_FIRST + 10)
 #define FP_ARG_LAST  (FP_ARG_FIRST + MAX_ARGS_IN_REGISTERS - 1)
-
-/* Helper macro for RVV vsetvl instruction generation.  */
-#define X0_REGNUM GP_REG_FIRST
 
 #define CALLEE_SAVED_REG_NUMBER(REGNO)			\
   ((REGNO) >= 8 && (REGNO) <= 9 ? (REGNO) - 8 :		\
@@ -849,7 +845,7 @@ typedef struct {
   "fs0", "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5",	\
   "fa6", "fa7", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7",	\
   "fs8", "fs9", "fs10","fs11","ft8", "ft9", "ft10","ft11",	\
-  "arg", "frame", "vl", "vtype", "N/A", "N/A", "N/A", "N/A",    \
+  "arg", "frame", "vl", "vtype", "vxrm", "N/A", "N/A", "N/A",   \
   "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",	\
   "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",	\
   "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",	\
@@ -1034,6 +1030,8 @@ extern unsigned riscv_stack_boundary;
 extern unsigned riscv_bytes_per_vector_chunk;
 extern poly_uint16 riscv_vector_chunks;
 extern poly_int64 riscv_v_adjust_nunits (enum machine_mode, int);
+extern poly_int64 riscv_v_adjust_precision (enum machine_mode, int);
+extern poly_int64 riscv_v_adjust_bytesize (enum machine_mode, int);
 /* The number of bits and bytes in a RVV vector.  */
 #define BITS_PER_RISCV_VECTOR (poly_uint16 (riscv_vector_chunks * riscv_bytes_per_vector_chunk * 8))
 #define BYTES_PER_RISCV_VECTOR (poly_uint16 (riscv_vector_chunks * riscv_bytes_per_vector_chunk))
@@ -1096,5 +1094,21 @@ extern void riscv_remove_unneeded_save_restore_calls (void);
 #define REGISTER_TARGET_PRAGMAS() riscv_register_pragmas ()
 
 #define REGMODE_NATURAL_SIZE(MODE) riscv_regmode_natural_size (MODE)
+
+#define RISCV_DWARF_VLENB (4096 + 0xc22)
+
+#define DWARF_FRAME_REGISTERS (FIRST_PSEUDO_REGISTER + 1 /* VLENB */)
+
+#define DWARF_REG_TO_UNWIND_COLUMN(REGNO) \
+  ((REGNO == RISCV_DWARF_VLENB) ? (FIRST_PSEUDO_REGISTER + 1) : REGNO)
+
+/* Like s390, riscv also defined this macro for the vector comparision.  Then
+   the simplify-rtx relational_result will canonicalize the result to the
+   CONST1_RTX for the simplification.  */
+#define VECTOR_STORE_FLAG_VALUE(MODE) CONSTM1_RTX (GET_MODE_INNER (MODE))
+
+/* Mode switching (Lazy code motion) for RVV rounding mode instructions.  */
+#define OPTIMIZE_MODE_SWITCHING(ENTITY) (TARGET_VECTOR)
+#define NUM_MODES_FOR_MODE_SWITCHING {VXRM_MODE_NONE}
 
 #endif /* ! GCC_RISCV_H */

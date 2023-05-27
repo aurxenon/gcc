@@ -37,14 +37,19 @@ bool fold_range (vrange &v, gimple *s, edge on_edge, range_query *q = NULL);
 
 // These routines the operands to be specified when manually folding.
 // Any excess queries will be drawn from the current range_query.
-bool fold_range (vrange &r, gimple *s, vrange &r1);
-bool fold_range (vrange &r, gimple *s, vrange &r1, vrange &r2);
-bool fold_range (vrange &r, gimple *s, unsigned num_elements, vrange **vector);
+bool fold_range (vrange &r, gimple *s, vrange &r1, range_query *q = NULL);
+bool fold_range (vrange &r, gimple *s, vrange &r1, vrange &r2,
+		 range_query *q = NULL);
+bool fold_range (vrange &r, gimple *s, unsigned num_elements, vrange **vector,
+		 range_query *q = NULL);
+
+// This routine will return a relation trio for stmt S.
+relation_trio fold_relations (gimple *s, range_query *q = NULL);
 
 // Return the type of range which statement S calculates.  If the type is
 // unsupported or no type can be determined, return NULL_TREE.
 
-static inline tree
+inline tree
 gimple_range_type (const gimple *s)
 {
   tree lhs = gimple_get_lhs (s);
@@ -73,7 +78,7 @@ gimple_range_type (const gimple *s)
 
 // Return EXP if it is an SSA_NAME with a type supported by gimple ranges.
 
-static inline tree
+inline tree
 gimple_range_ssa_p (tree exp)
 {
   if (exp && TREE_CODE (exp) == SSA_NAME &&
@@ -86,7 +91,7 @@ gimple_range_ssa_p (tree exp)
 
 // Return true if TYPE1 and TYPE2 are compatible range types.
 
-static inline bool
+inline bool
 range_compatible_p (tree type1, tree type2)
 {
   // types_compatible_p requires conversion in both directions to be useless.
@@ -149,7 +154,7 @@ protected:
   relation_oracle *m_oracle;
 };
 
-// This class uses ranges to fold a gimple statement producinf a range for
+// This class uses ranges to fold a gimple statement producing a range for
 // the LHS.  The source of all operands is supplied via the fur_source class
 // which provides a range_query as well as a source location and any other
 // required information.

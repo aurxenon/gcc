@@ -526,7 +526,7 @@ diag_attr_exclusions (tree last_decl, tree node, tree attrname,
 	    continue;
 
 	  if ((TREE_CODE (node) == FIELD_DECL
-	       || TREE_CODE (node) == VAR_DECL)
+	       || VAR_P (node))
 	      && !excl->variable)
 	    continue;
 
@@ -783,8 +783,7 @@ decl_attributes (tree *node, tree attributes, int flags,
 	  && TREE_CODE (*anode) != METHOD_TYPE)
 	{
 	  if (TREE_CODE (*anode) == POINTER_TYPE
-	      && (TREE_CODE (TREE_TYPE (*anode)) == FUNCTION_TYPE
-		  || TREE_CODE (TREE_TYPE (*anode)) == METHOD_TYPE))
+	      && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (*anode)))
 	    {
 	      /* OK, this is a bit convoluted.  We can't just make a copy
 		 of the pointer type and modify its TREE_TYPE, because if
@@ -820,7 +819,7 @@ decl_attributes (tree *node, tree attributes, int flags,
 
       if (TYPE_P (*anode)
 	  && (flags & (int) ATTR_FLAG_TYPE_IN_PLACE)
-	  && TYPE_SIZE (*anode) != NULL_TREE)
+	  && COMPLETE_TYPE_P (*anode))
 	{
 	  warning (OPT_Wattributes, "type attributes ignored after type is already defined");
 	  continue;
@@ -846,6 +845,7 @@ decl_attributes (tree *node, tree attributes, int flags,
 	      || !DECL_P (*anode)
 	      || DECL_BUILT_IN_CLASS (*anode) != BUILT_IN_NORMAL
 	      || (DECL_FUNCTION_CODE (*anode) != BUILT_IN_UNREACHABLE
+		  && DECL_FUNCTION_CODE (*anode) != BUILT_IN_UNREACHABLE_TRAP
 		  && (DECL_FUNCTION_CODE (*anode)
 		      != BUILT_IN_UBSAN_HANDLE_BUILTIN_UNREACHABLE)))
 	    {
@@ -1277,9 +1277,7 @@ build_type_attribute_qual_variant (tree otype, tree attribute, int quals)
 	 build_duplicate_type is another solution (as used in
 	 handle_transparent_union_attribute), but that doesn't play well
 	 with the stronger C++ type identity model.  */
-      if (TREE_CODE (ttype) == RECORD_TYPE
-	  || TREE_CODE (ttype) == UNION_TYPE
-	  || TREE_CODE (ttype) == QUAL_UNION_TYPE
+      if (RECORD_OR_UNION_TYPE_P (ttype)
 	  || TREE_CODE (ttype) == ENUMERAL_TYPE)
 	{
 	  warning (OPT_Wattributes,

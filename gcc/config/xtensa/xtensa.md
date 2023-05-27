@@ -170,15 +170,24 @@
    (set_attr "mode"	"SI")
    (set_attr "length"	"2,2,3,3,3")])
 
-(define_insn "*addx"
+(define_insn "*addsubx"
   [(set (match_operand:SI 0 "register_operand" "=a")
-	(plus:SI (ashift:SI (match_operand:SI 1 "register_operand" "r")
+	(match_operator:SI 4 "addsub_operator"
+		[(ashift:SI (match_operand:SI 1 "register_operand" "r")
 			    (match_operand:SI 3 "addsubx_operand" "i"))
-		 (match_operand:SI 2 "register_operand" "r")))]
+		 (match_operand:SI 2 "register_operand" "r")]))]
   "TARGET_ADDX"
 {
   operands[3] = GEN_INT (1 << INTVAL (operands[3]));
-  return "addx%3\t%0, %1, %2";
+  switch (GET_CODE (operands[4]))
+    {
+    case PLUS:
+      return "addx%3\t%0, %1, %2";
+    case MINUS:
+      return "subx%3\t%0, %1, %2";
+    default:
+      gcc_unreachable ();
+    }
 }
   [(set_attr "type"	"arith")
    (set_attr "mode"	"SI")
@@ -207,19 +216,29 @@
    (set_attr "mode"	"SI")
    (set_attr "length"	"3")])
 
-(define_insn "*subx"
+(define_insn_and_split "*subsi3_from_const"
   [(set (match_operand:SI 0 "register_operand" "=a")
-	(minus:SI (ashift:SI (match_operand:SI 1 "register_operand" "r")
-			     (match_operand:SI 3 "addsubx_operand" "i"))
+	(minus:SI (match_operand:SI 1 "const_int_operand" "i")
 		  (match_operand:SI 2 "register_operand" "r")))]
-  "TARGET_ADDX"
+  "xtensa_simm8 (-INTVAL (operands[1]))
+   || xtensa_simm8x256 (-INTVAL (operands[1]))"
+  "#"
+  "&& 1"
+  [(set (match_dup 0)
+	(plus:SI (match_dup 2)
+		 (match_dup 1)))
+   (set (match_dup 0)
+	(neg:SI (match_dup 0)))]
 {
-  operands[3] = GEN_INT (1 << INTVAL (operands[3]));
-  return "subx%3\t%0, %1, %2";
+  operands[1] = GEN_INT (-INTVAL (operands[1]));
 }
   [(set_attr "type"	"arith")
    (set_attr "mode"	"SI")
-   (set_attr "length"	"3")])
+   (set (attr "length")
+	(if_then_else (match_test "TARGET_DENSITY
+				   && xtensa_m1_or_1_thru_15 (-INTVAL (operands[1]))")
+		      (const_int 5)
+		      (const_int 6)))])
 
 (define_insn "subsf3"
   [(set (match_operand:SF 0 "register_operand" "=f")
@@ -442,6 +461,43 @@
 		       (match_operand:SI 2 "register_operand" "r")))]
   "TARGET_MINMAX"
   "<minmax>\t%0, %1, %2"
+  [(set_attr "type"	"arith")
+   (set_attr "mode"	"SI")
+   (set_attr "length"	"3")])
+
+
+;; Signed clamp.
+
+(define_insn_and_split "*xtensa_clamps"
+  [(set (match_operand:SI 0 "register_operand" "=a")
+	(smax:SI (smin:SI (match_operand:SI 1 "register_operand" "r")
+			  (match_operand:SI 2 "const_int_operand" "i"))
+		 (match_operand:SI 3 "const_int_operand" "i")))]
+  "TARGET_CLAMPS
+   && xtensa_match_CLAMPS_imms_p (operands[3], operands[2])"
+  "#"
+  "&& 1"
+  [(set (match_dup 0)
+	(smin:SI (smax:SI (match_dup 1)
+			  (match_dup 3))
+		 (match_dup 2)))]
+  ""
+  [(set_attr "type"	"arith")
+   (set_attr "mode"	"SI")
+   (set_attr "length"	"3")])
+
+(define_insn "*xtensa_clamps"
+  [(set (match_operand:SI 0 "register_operand" "=a")
+	(smin:SI (smax:SI (match_operand:SI 1 "register_operand" "r")
+			  (match_operand:SI 2 "const_int_operand" "i"))
+		 (match_operand:SI 3 "const_int_operand" "i")))]
+  "TARGET_CLAMPS
+   && xtensa_match_CLAMPS_imms_p (operands[2], operands[3])"
+{
+  static char result[64];
+  sprintf (result, "clamps\t%%0, %%1, %d", floor_log2 (-INTVAL (operands[2])));
+  return result;
+}
   [(set_attr "type"	"arith")
    (set_attr "mode"	"SI")
    (set_attr "length"	"3")])
@@ -960,6 +1016,90 @@
    (set_attr "mode"	"SI")
    (set_attr "length"	"3")])
 
+(define_insn_and_split "*extzvsi-1bit_ashlsi3"
+  [(set (match_operand:SI 0 "register_operand" "=a")
+	(and:SI (match_operator:SI 4 "logical_shift_operator"
+			[(match_operand:SI 1 "register_operand" "r")
+			 (match_operand:SI 2 "const_int_operand" "i")])
+		(match_operand:SI 3 "const_int_operand" "i")))]
+  "exact_log2 (INTVAL (operands[3])) > 0"
+  "#"
+  "&& 1"
+  [(set (match_dup 0)
+	(zero_extract:SI (match_dup 1)
+			 (const_int 1)
+			 (match_dup 2)))
+   (set (match_dup 0)
+	(ashift:SI (match_dup 0)
+		   (match_dup 3)))]
+{
+  int pos = INTVAL (operands[2]), shift = floor_log2 (INTVAL (operands[3]));
+  switch (GET_CODE (operands[4]))
+    {
+    case ASHIFT:
+      pos = shift - pos;
+      break;
+    case LSHIFTRT:
+      pos = shift + pos;
+      break;
+    default:
+      gcc_unreachable ();
+    }
+  if (BITS_BIG_ENDIAN)
+    pos = (32 - (1 + pos)) & 0x1f;
+  operands[2] = GEN_INT (pos);
+  operands[3] = GEN_INT (shift);
+}
+  [(set_attr "type"	"arith")
+   (set_attr "mode"	"SI")
+   (set (attr "length")
+        (if_then_else (match_test "TARGET_DENSITY && INTVAL (operands[3]) == 2")
+		      (const_int 5)
+		      (const_int 6)))])
+
+(define_insn_and_split "*extzvsi-1bit_addsubx"
+  [(set (match_operand:SI 0 "register_operand" "=a")
+	(match_operator:SI 5 "addsub_operator"
+		[(and:SI (match_operator:SI 6 "logical_shift_operator"
+				[(match_operand:SI 1 "register_operand" "r")
+				 (match_operand:SI 3 "const_int_operand" "i")])
+			 (match_operand:SI 4 "const_int_operand" "i"))
+		 (match_operand:SI 2 "register_operand" "r")]))]
+  "TARGET_ADDX
+   && IN_RANGE (exact_log2 (INTVAL (operands[4])), 1, 3)"
+  "#"
+  "&& 1"
+  [(set (match_dup 0)
+	(zero_extract:SI (match_dup 1)
+			 (const_int 1)
+			 (match_dup 3)))
+   (set (match_dup 0)
+	(match_op_dup 5
+		[(ashift:SI (match_dup 0)
+			    (match_dup 4))
+		 (match_dup 2)]))]
+{
+  int pos = INTVAL (operands[3]), shift = floor_log2 (INTVAL (operands[4]));
+  switch (GET_CODE (operands[6]))
+    {
+    case ASHIFT:
+      pos = shift - pos;
+      break;
+    case LSHIFTRT:
+      pos = shift + pos;
+      break;
+    default:
+      gcc_unreachable ();
+    }
+  if (BITS_BIG_ENDIAN)
+    pos = (32 - (1 + pos)) & 0x1f;
+  operands[3] = GEN_INT (pos);
+  operands[4] = GEN_INT (shift);
+}
+  [(set_attr "type"	"arith")
+   (set_attr "mode"	"SI")
+   (set_attr "length"	"6")])
+
 
 ;; Conversions.
 
@@ -1407,9 +1547,7 @@
    (match_operand:SI 3 "const_int_operand")]
   "!optimize_debug && optimize"
 {
-  if (xtensa_expand_block_set_unrolled_loop (operands))
-    DONE;
-  if (xtensa_expand_block_set_small_loop (operands))
+  if (xtensa_expand_block_set (operands))
     DONE;
   FAIL;
 })
@@ -2028,8 +2166,8 @@
 		      (label_ref (match_operand 1 "" ""))
 		      (pc)))
    (set (match_operand:SI 0 "register_operand" "=a")
-	(plus (match_dup 0)
-	      (const_int -1)))
+	(plus:SI (match_dup 0)
+		 (const_int -1)))
    (unspec [(const_int 0)] UNSPEC_LSETUP_START)]
   "TARGET_LOOPS && optimize"
   "loop\t%0, %l1_LEND"
@@ -2044,8 +2182,8 @@
 		      (label_ref (match_operand 1 "" ""))
 		      (pc)))
    (set (match_operand:SI 0 "nonimmediate_operand" "=a,m")
-	(plus (match_dup 0)
-	      (const_int -1)))
+	(plus:SI (match_dup 0)
+		 (const_int -1)))
    (unspec [(const_int 0)] UNSPEC_LSETUP_END)
    (clobber (match_scratch:SI 3 "=X,&r"))]
   "TARGET_LOOPS && optimize"
@@ -2061,8 +2199,8 @@
 		      (label_ref (match_operand 1 "" ""))
 		      (pc)))
    (set (match_operand:SI 0 "register_operand" "=a")
-	(plus (match_dup 0)
-	      (const_int -1)))
+	(plus:SI (match_dup 0)
+		 (const_int -1)))
    (unspec [(const_int 0)] UNSPEC_LSETUP_END)]
   "TARGET_LOOPS && optimize"
 {
@@ -2333,7 +2471,8 @@
 	 (match_operand 1 "" ""))]
   ""
 {
-  xtensa_prepare_expand_call (0, operands);
+  xtensa_expand_call (0, operands);
+  DONE;
 })
 
 (define_insn "call_internal"
@@ -2353,7 +2492,8 @@
 	      (match_operand 2 "" "")))]
   ""
 {
-  xtensa_prepare_expand_call (1, operands);
+  xtensa_expand_call (1, operands);
+  DONE;
 })
 
 (define_insn "call_value_internal"
@@ -2373,7 +2513,8 @@
 	 (match_operand 1 "" ""))]
   "!TARGET_WINDOWED_ABI"
 {
-  xtensa_prepare_expand_call (0, operands);
+  xtensa_expand_call (0, operands);
+  DONE;
 })
 
 (define_insn "sibcall_internal"
@@ -2393,7 +2534,8 @@
 	      (match_operand 2 "" "")))]
   "!TARGET_WINDOWED_ABI"
 {
-  xtensa_prepare_expand_call (1, operands);
+  xtensa_expand_call (1, operands);
+  DONE;
 })
 
 (define_insn "sibcall_value_internal"
@@ -3049,4 +3191,50 @@ FALLTHRU:;
   imm0 = value - imm1 - 128;
   operands[1] = GEN_INT (imm0);
   operands[2] = GEN_INT (imm1);
+})
+
+(define_peephole2
+  [(set (match_operand 0 "register_operand")
+	(match_operand 1 "register_operand"))]
+  "REG_NREGS (operands[0]) == 1 && GP_REG_P (REGNO (operands[0]))
+   && REG_NREGS (operands[1]) == 1 && GP_REG_P (REGNO (operands[1]))
+   && peep2_reg_dead_p (1, operands[1])"
+  [(const_int 0)]
+{
+  basic_block bb = BLOCK_FOR_INSN (curr_insn);
+  rtx_insn *head = BB_HEAD (bb), *insn;
+  rtx dest = operands[0], src = operands[1], pattern, t_dest, dest_orig;
+  for (insn = PREV_INSN (curr_insn);
+       insn && insn != head;
+       insn = PREV_INSN (insn))
+    if (CALL_P (insn))
+      break;
+    else if (INSN_P (insn))
+      {
+	if (GET_CODE (pattern = PATTERN (insn)) == SET
+	    && REG_P (t_dest = SET_DEST (pattern))
+	    && REG_NREGS (t_dest) == 1
+	    && REGNO (t_dest) == REGNO (src))
+	{
+	  dest_orig = SET_DEST (pattern);
+	  SET_DEST (pattern) = gen_rtx_REG (GET_MODE (t_dest),
+					    REGNO (dest));
+	  extract_insn (insn);
+	  if (!constrain_operands (true, get_enabled_alternatives (insn)))
+	    {
+	      SET_DEST (pattern) = dest_orig;
+	      goto ABORT;
+	    }
+	  df_insn_rescan (insn);
+	  goto FALLTHRU;
+	}
+	if (reg_overlap_mentioned_p (dest, pattern)
+	    || reg_overlap_mentioned_p (src, pattern)
+	    || set_of (dest, insn)
+	    || set_of (src, insn))
+	  break;
+      }
+ABORT:
+  FAIL;
+FALLTHRU:;
 })

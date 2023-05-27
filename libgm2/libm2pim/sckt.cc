@@ -27,6 +27,10 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #include <config.h>
 #include <m2rts.h>
 
+#define EXPORT(FUNC) m2pim ## _sckt_ ## FUNC
+#define M2EXPORT(FUNC) m2pim ## _M2_sckt_ ## FUNC
+#define M2LIBNAME "m2pim"
+
 #if defined(HAVE_SYS_TYPES_H)
 #include <sys/types.h>
 #endif
@@ -81,13 +85,6 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 
 #undef DEBUGGING
 
-#if !defined(TRUE)
-#define TRUE (1 == 1)
-#endif
-#if !defined(FALSE)
-#define FALSE (1 == 0)
-#endif
-
 #if defined(HAVE_SYS_SOCKET_H)
 
 #define ERROR(X)                                                              \
@@ -125,7 +122,7 @@ localExit (int i)
    This method attempts to use the port specified by the parameter.  */
 
 extern "C" tcpServerState *
-tcpServerEstablishPort (int portNo)
+EXPORT(tcpServerEstablishPort) (int portNo)
 {
   tcpServerState *s = (tcpServerState *)malloc (sizeof (tcpServerState));
   int b, p, n;
@@ -180,16 +177,16 @@ tcpServerEstablishPort (int portNo)
    information about a socket declared to receive tcp connections.  */
 
 extern "C" tcpServerState *
-tcpServerEstablish (void)
+EXPORT(tcpServerEstablish) (void)
 {
-  return tcpServerEstablishPort (PORTSTART);
+  return EXPORT(tcpServerEstablishPort) (PORTSTART);
 }
 
 /* tcpServerAccept returns a file descriptor once a client has connected and
    been accepted.  */
 
 extern "C" int
-tcpServerAccept (tcpServerState *s)
+EXPORT(tcpServerAccept) (tcpServerState *s)
 {
   socklen_t i = sizeof (s->isa);
   int t;
@@ -204,7 +201,7 @@ tcpServerAccept (tcpServerState *s)
 /* tcpServerPortNo returns the portNo from structure, s.  */
 
 extern "C" int
-tcpServerPortNo (tcpServerState *s)
+EXPORT(tcpServerPortNo) (tcpServerState *s)
 {
   return s->portNo;
 }
@@ -212,7 +209,7 @@ tcpServerPortNo (tcpServerState *s)
 /* tcpServerSocketFd returns the sockFd from structure, s.  */
 
 extern "C" int
-tcpServerSocketFd (tcpServerState *s)
+EXPORT(tcpServerSocketFd) (tcpServerState *s)
 {
   return s->sockFd;
 }
@@ -220,7 +217,7 @@ tcpServerSocketFd (tcpServerState *s)
 /* getLocalIP returns the IP address of this machine.  */
 
 extern "C" unsigned int
-getLocalIP (tcpServerState *s)
+EXPORT(getLocalIP) (tcpServerState *s)
 {
   char hostname[1024];
   struct hostent *hp;
@@ -247,7 +244,7 @@ getLocalIP (tcpServerState *s)
       return 0;
     }
 
-  memset (&sa, sizeof (struct sockaddr_in), 0);
+  memset (&sa, 0, sizeof (struct sockaddr_in));
   sa.sin_family = AF_INET;
   sa.sin_port = htons (80);
   if (hp->h_length == sizeof (unsigned int))
@@ -262,7 +259,7 @@ getLocalIP (tcpServerState *s)
 /* tcpServerIP returns the IP address from structure s.  */
 
 extern "C" int
-tcpServerIP (tcpServerState *s)
+EXPORT(tcpServerIP) (tcpServerState *s)
 {
   return *((int *)s->hp->h_addr_list[0]);
 }
@@ -271,7 +268,7 @@ tcpServerIP (tcpServerState *s)
    has connected to server s.  */
 
 extern "C" unsigned int
-tcpServerClientIP (tcpServerState *s)
+EXPORT(tcpServerClientIP) (tcpServerState *s)
 {
   unsigned int ip;
 
@@ -285,7 +282,7 @@ tcpServerClientIP (tcpServerState *s)
    has connected to server s.  */
 
 extern "C" unsigned int
-tcpServerClientPortNo (tcpServerState *s)
+EXPORT(tcpServerClientPortNo) (tcpServerState *s)
 {
   return s->isa.sin_port;
 }
@@ -309,7 +306,7 @@ typedef struct
    connected to, serverName:portNo.  */
 
 extern "C" tcpClientState *
-tcpClientSocket (char *serverName, int portNo)
+EXPORT(tcpClientSocket) (char *serverName, int portNo)
 {
   tcpClientState *s = (tcpClientState *)malloc (sizeof (tcpClientState));
 
@@ -342,7 +339,7 @@ tcpClientSocket (char *serverName, int portNo)
    connected to, ip:portNo.  */
 
 extern "C" tcpClientState *
-tcpClientSocketIP (unsigned int ip, int portNo)
+EXPORT(tcpClientSocketIP) (unsigned int ip, int portNo)
 {
   tcpClientState *s = (tcpClientState *)malloc (sizeof (tcpClientState));
 
@@ -368,7 +365,7 @@ tcpClientSocketIP (unsigned int ip, int portNo)
    once a connect has been performed.  */
 
 extern "C" int
-tcpClientConnect (tcpClientState *s)
+EXPORT(tcpClientConnect) (tcpClientState *s)
 {
   if (connect (s->sockFd, (struct sockaddr *)&s->sa, sizeof (s->sa)) < 0)
     ERROR ("failed to connect to the TCP server");
@@ -379,7 +376,7 @@ tcpClientConnect (tcpClientState *s)
 /* tcpClientPortNo returns the portNo from structure s.  */
 
 extern "C" int
-tcpClientPortNo (tcpClientState *s)
+EXPORT(tcpClientPortNo) (tcpClientState *s)
 {
   return s->portNo;
 }
@@ -387,7 +384,7 @@ tcpClientPortNo (tcpClientState *s)
 /* tcpClientSocketFd returns the sockFd from structure s.  */
 
 extern "C" int
-tcpClientSocketFd (tcpClientState *s)
+EXPORT(tcpClientSocketFd) (tcpClientState *s)
 {
   return s->sockFd;
 }
@@ -395,7 +392,7 @@ tcpClientSocketFd (tcpClientState *s)
 /* tcpClientIP returns the sockFd from structure s.  */
 
 extern "C" int
-tcpClientIP (tcpClientState *s)
+EXPORT(tcpClientIP) (tcpClientState *s)
 {
 #if defined(DEBUGGING)
   printf ("client ip = %s\n", inet_ntoa (s->sa.sin_addr.s_addr));
@@ -407,23 +404,24 @@ tcpClientIP (tcpClientState *s)
 /* GNU Modula-2 link fodder.  */
 
 extern "C" void
-_M2_sckt_init (int, char *[], char *[])
+M2EXPORT(init) (int, char *[], char *[])
 {
 }
 
 extern "C" void
-_M2_sckt_finish (int, char *[], char *[])
+M2EXPORT(finish) (int, char *[], char *[])
 {
 }
 
 extern "C" void
-_M2_sckt_dep (void)
+M2EXPORT(dep) (void)
 {
 }
 
 extern "C" void __attribute__((__constructor__))
-_M2_sckt_ctor (void)
+M2EXPORT(ctor) (void)
 {
-  M2RTS_RegisterModule ("sckt", _M2_sckt_init, _M2_sckt_finish,
-			_M2_sckt_dep);
+  m2pim_M2RTS_RegisterModule ("sckt", M2LIBNAME,
+			      M2EXPORT(init), M2EXPORT(finish),
+			      M2EXPORT(dep));
 }

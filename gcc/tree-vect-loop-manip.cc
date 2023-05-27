@@ -385,6 +385,63 @@ vect_maybe_permute_loop_masks (gimple_seq *seq, rgroup_controls *dest_rgm,
   return false;
 }
 
+/* Populate DEST_RGM->controls, given that they should add up to STEP.
+
+     STEP = MIN_EXPR <ivtmp_34, VF>;
+
+     First length (MIN (X, VF/N)):
+       loop_len_15 = MIN_EXPR <STEP, VF/N>;
+
+     Second length:
+       tmp = STEP - loop_len_15;
+       loop_len_16 = MIN (tmp, VF/N);
+
+     Third length:
+       tmp2 = tmp - loop_len_16;
+       loop_len_17 = MIN (tmp2, VF/N);
+
+     Last length:
+       loop_len_18 = tmp2 - loop_len_17;
+*/
+
+static void
+vect_adjust_loop_lens_control (tree iv_type, gimple_seq *seq,
+			       rgroup_controls *dest_rgm, tree step)
+{
+  tree ctrl_type = dest_rgm->type;
+  poly_uint64 nitems_per_ctrl
+    = TYPE_VECTOR_SUBPARTS (ctrl_type) * dest_rgm->factor;
+  tree length_limit = build_int_cst (iv_type, nitems_per_ctrl);
+
+  for (unsigned int i = 0; i < dest_rgm->controls.length (); ++i)
+    {
+      tree ctrl = dest_rgm->controls[i];
+      if (i == 0)
+	{
+	  /* First iteration: MIN (X, VF/N) capped to the range [0, VF/N].  */
+	  gassign *assign
+	    = gimple_build_assign (ctrl, MIN_EXPR, step, length_limit);
+	  gimple_seq_add_stmt (seq, assign);
+	}
+      else if (i == dest_rgm->controls.length () - 1)
+	{
+	  /* Last iteration: Remain capped to the range [0, VF/N].  */
+	  gassign *assign = gimple_build_assign (ctrl, MINUS_EXPR, step,
+						 dest_rgm->controls[i - 1]);
+	  gimple_seq_add_stmt (seq, assign);
+	}
+      else
+	{
+	  /* (MIN (remain, VF*I/N)) capped to the range [0, VF/N].  */
+	  step = gimple_build (seq, MINUS_EXPR, iv_type, step,
+			       dest_rgm->controls[i - 1]);
+	  gassign *assign
+	    = gimple_build_assign (ctrl, MIN_EXPR, step, length_limit);
+	  gimple_seq_add_stmt (seq, assign);
+	}
+    }
+}
+
 /* Helper for vect_set_loop_condition_partial_vectors.  Generate definitions
    for all the rgroup controls in RGC and return a control that is nonzero
    when the loop needs to iterate.  Add any new preheader statements to
@@ -425,7 +482,8 @@ vect_set_loop_controls_directly (class loop *loop, loop_vec_info loop_vinfo,
 				 gimple_seq *header_seq,
 				 gimple_stmt_iterator loop_cond_gsi,
 				 rgroup_controls *rgc, tree niters,
-				 tree niters_skip, bool might_wrap_p)
+				 tree niters_skip, bool might_wrap_p,
+				 tree *iv_step)
 {
   tree compare_type = LOOP_VINFO_RGROUP_COMPARE_TYPE (loop_vinfo);
   tree iv_type = LOOP_VINFO_RGROUP_IV_TYPE (loop_vinfo);
@@ -468,8 +526,42 @@ vect_set_loop_controls_directly (class loop *loop, loop_vec_info loop_vinfo,
   gimple_stmt_iterator incr_gsi;
   bool insert_after;
   standard_iv_increment_position (loop, &incr_gsi, &insert_after);
-  create_iv (build_int_cst (iv_type, 0), nitems_step, NULL_TREE, loop,
-	     &incr_gsi, insert_after, &index_before_incr, &index_after_incr);
+  if (LOOP_VINFO_USING_DECREMENTING_IV_P (loop_vinfo))
+    {
+      /* Create an IV that counts down from niters_total and whose step
+	 is the (variable) amount processed in the current iteration:
+	   ...
+	   _10 = (unsigned long) count_12(D);
+	   ...
+	   # ivtmp_9 = PHI <ivtmp_35(6), _10(5)>
+	   _36 = MIN_EXPR <ivtmp_9, POLY_INT_CST [4, 4]>;
+	   ...
+	   vect__4.8_28 = .LEN_LOAD (_17, 32B, _36, 0);
+	   ...
+	   ivtmp_35 = ivtmp_9 - _36;
+	   ...
+	   if (ivtmp_35 != 0)
+	     goto <bb 4>; [83.33%]
+	   else
+	     goto <bb 5>; [16.67%]
+      */
+      nitems_total = gimple_convert (preheader_seq, iv_type, nitems_total);
+      tree step = rgc->controls.length () == 1 ? rgc->controls[0]
+					       : make_ssa_name (iv_type);
+      /* Create decrement IV.  */
+      create_iv (nitems_total, MINUS_EXPR, step, NULL_TREE, loop, &incr_gsi,
+		 insert_after, &index_before_incr, &index_after_incr);
+      gimple_seq_add_stmt (header_seq, gimple_build_assign (step, MIN_EXPR,
+							    index_before_incr,
+							    nitems_step));
+      *iv_step = step;
+      return index_after_incr;
+    }
+
+  /* Create increment IV.  */
+  create_iv (build_int_cst (iv_type, 0), PLUS_EXPR, nitems_step, NULL_TREE,
+	     loop, &incr_gsi, insert_after, &index_before_incr,
+	     &index_after_incr);
 
   tree zero_index = build_int_cst (compare_type, 0);
   tree test_index, test_limit, first_limit;
@@ -732,7 +824,9 @@ vect_set_loop_condition_partial_vectors (class loop *loop,
      the first control from any rgroup for the loop condition; here we
      arbitrarily pick the last.  */
   tree test_ctrl = NULL_TREE;
+  tree iv_step = NULL_TREE;
   rgroup_controls *rgc;
+  rgroup_controls *iv_rgc = nullptr;
   unsigned int i;
   auto_vec<rgroup_controls> *controls = use_masks_p
 					  ? &LOOP_VINFO_MASKS (loop_vinfo)
@@ -752,17 +846,36 @@ vect_set_loop_condition_partial_vectors (class loop *loop,
 	      continue;
 	  }
 
-	/* See whether zero-based IV would ever generate all-false masks
-	   or zero length before wrapping around.  */
-	bool might_wrap_p = vect_rgroup_iv_might_wrap_p (loop_vinfo, rgc);
+	if (!LOOP_VINFO_USING_DECREMENTING_IV_P (loop_vinfo)
+	    || !iv_rgc
+	    || (iv_rgc->max_nscalars_per_iter * iv_rgc->factor
+		!= rgc->max_nscalars_per_iter * rgc->factor))
+	  {
+	    /* See whether zero-based IV would ever generate all-false masks
+	       or zero length before wrapping around.  */
+	    bool might_wrap_p = vect_rgroup_iv_might_wrap_p (loop_vinfo, rgc);
 
-	/* Set up all controls for this group.  */
-	test_ctrl = vect_set_loop_controls_directly (loop, loop_vinfo,
-						     &preheader_seq,
-						     &header_seq,
-						     loop_cond_gsi, rgc,
-						     niters, niters_skip,
-						     might_wrap_p);
+	    /* Set up all controls for this group.  */
+	    test_ctrl
+	      = vect_set_loop_controls_directly (loop, loop_vinfo,
+						 &preheader_seq, &header_seq,
+						 loop_cond_gsi, rgc, niters,
+						 niters_skip, might_wrap_p,
+						 &iv_step);
+
+	    iv_rgc = rgc;
+	  }
+
+	if (LOOP_VINFO_USING_DECREMENTING_IV_P (loop_vinfo)
+	    && rgc->controls.length () > 1)
+	  {
+	    /* vect_set_loop_controls_directly creates an IV whose step
+	       is equal to the expected sum of RGC->controls.  Use that
+	       information to populate RGC->controls.  */
+	    tree iv_type = LOOP_VINFO_RGROUP_IV_TYPE (loop_vinfo);
+	    gcc_assert (iv_step);
+	    vect_adjust_loop_lens_control (iv_type, &header_seq, rgc, iv_step);
+	  }
       }
 
   /* Emit all accumulated statements.  */
@@ -893,7 +1006,7 @@ vect_set_loop_condition_normal (class loop *loop, tree niters, tree step,
     }
 
   standard_iv_increment_position (loop, &incr_gsi, &insert_after);
-  create_iv (init, step, NULL_TREE, loop,
+  create_iv (init, PLUS_EXPR, step, NULL_TREE, loop,
              &incr_gsi, insert_after, &indx_before_incr, &indx_after_incr);
   indx_after_incr = force_gimple_operand_gsi (&loop_cond_gsi, indx_after_incr,
 					      true, NULL_TREE, true,
@@ -1080,12 +1193,6 @@ slpeel_tree_duplicate_loop_to_edge_cfg (class loop *loop,
   /* Allow duplication of outer loops.  */
   if (scalar_loop->inner)
     duplicate_outer_loop = true;
-  /* Check whether duplication is possible.  */
-  if (!can_copy_bbs_p (pbbs, scalar_loop->num_nodes))
-    {
-      free (bbs);
-      return NULL;
-    }
 
   /* Generate new loop structure.  */
   new_loop = duplicate_loop (scalar_loop, loop_outer (scalar_loop));
@@ -1329,7 +1436,11 @@ slpeel_can_duplicate_loop_p (const class loop *loop, const_edge e)
       || (e != exit_e && e != entry_e))
     return false;
 
-  return true;
+  basic_block *bbs = XNEWVEC (basic_block, loop->num_nodes);
+  get_loop_body_with_size (loop, bbs, loop->num_nodes);
+  bool ret = can_copy_bbs_p (bbs, loop->num_nodes);
+  free (bbs);
+  return ret;
 }
 
 /* Function vect_get_loop_location.
@@ -1386,6 +1497,50 @@ iv_phi_p (stmt_vec_info stmt_info)
   if (STMT_VINFO_DEF_TYPE (stmt_info) == vect_reduction_def
       || STMT_VINFO_DEF_TYPE (stmt_info) == vect_double_reduction_def)
     return false;
+
+  return true;
+}
+
+/* Return true if vectorizer can peel for nonlinear iv.  */
+static bool
+vect_can_peel_nonlinear_iv_p (loop_vec_info loop_vinfo,
+			      enum vect_induction_op_type induction_type)
+{
+  tree niters_skip;
+  /* Init_expr will be update by vect_update_ivs_after_vectorizer,
+     if niters or vf is unkown:
+     For shift, when shift mount >= precision, there would be UD.
+     For mult, don't known how to generate
+     init_expr * pow (step, niters) for variable niters.
+     For neg, it should be ok, since niters of vectorized main loop
+     will always be multiple of 2.  */
+  if ((!LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
+       || !LOOP_VINFO_VECT_FACTOR (loop_vinfo).is_constant ())
+      && induction_type != vect_step_op_neg)
+    {
+      if (dump_enabled_p ())
+	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			 "Peeling for epilogue is not supported"
+			 " for nonlinear induction except neg"
+			 " when iteration count is unknown.\n");
+      return false;
+    }
+
+  /* Also doens't support peel for neg when niter is variable.
+     ??? generate something like niter_expr & 1 ? init_expr : -init_expr?  */
+  niters_skip = LOOP_VINFO_MASK_SKIP_NITERS (loop_vinfo);
+  if ((niters_skip != NULL_TREE
+       && TREE_CODE (niters_skip) != INTEGER_CST)
+      || (!vect_use_loop_mask_for_alignment_p (loop_vinfo)
+	  && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo) < 0))
+    {
+      if (dump_enabled_p ())
+	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			 "Peeling for alignement is not supported"
+			 " for nonlinear induction when niters_skip"
+			 " is not constant.\n");
+      return false;
+    }
 
   return true;
 }
@@ -2820,7 +2975,6 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	}
     }
 
-  dump_user_location_t loop_loc = find_loop_location (loop);
   if (vect_epilogues)
     /* Make sure to set the epilogue's epilogue scalar loop, such that we can
        use the original scalar loop as remaining epilogue if necessary.  */
@@ -2830,20 +2984,11 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
   if (prolog_peeling)
     {
       e = loop_preheader_edge (loop);
-      if (!slpeel_can_duplicate_loop_p (loop, e))
-	{
-	  dump_printf_loc (MSG_MISSED_OPTIMIZATION, loop_loc,
-			   "loop can't be duplicated to preheader edge.\n");
-	  gcc_unreachable ();
-	}
+      gcc_checking_assert (slpeel_can_duplicate_loop_p (loop, e));
+
       /* Peel prolog and put it on preheader edge of loop.  */
       prolog = slpeel_tree_duplicate_loop_to_edge_cfg (loop, scalar_loop, e);
-      if (!prolog)
-	{
-	  dump_printf_loc (MSG_MISSED_OPTIMIZATION, loop_loc,
-			   "slpeel_tree_duplicate_loop_to_edge_cfg failed.\n");
-	  gcc_unreachable ();
-	}
+      gcc_assert (prolog);
       prolog->force_vectorize = false;
       slpeel_update_phi_nodes_for_loops (loop_vinfo, prolog, loop, true);
       first_loop = prolog;
@@ -2889,7 +3034,7 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
       if (new_var_p)
 	{
 	  value_range vr (type,
-			  wi::to_wide (build_int_cst (type, vf)),
+			  wi::to_wide (build_int_cst (type, lowest_vf)),
 			  wi::to_wide (TYPE_MAX_VALUE (type)));
 	  set_range_info (niters, vr);
 	}
@@ -2905,12 +3050,8 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
   if (epilog_peeling)
     {
       e = single_exit (loop);
-      if (!slpeel_can_duplicate_loop_p (loop, e))
-	{
-	  dump_printf_loc (MSG_MISSED_OPTIMIZATION, loop_loc,
-			   "loop can't be duplicated to exit edge.\n");
-	  gcc_unreachable ();
-	}
+      gcc_checking_assert (slpeel_can_duplicate_loop_p (loop, e));
+
       /* Peel epilog and put it on exit edge of loop.  If we are vectorizing
 	 said epilog then we should use a copy of the main loop as a starting
 	 point.  This loop may have already had some preliminary transformations
@@ -2920,12 +3061,8 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	 vectorizing.  */
       epilog = vect_epilogues ? get_loop_copy (loop) : scalar_loop;
       epilog = slpeel_tree_duplicate_loop_to_edge_cfg (loop, epilog, e);
-      if (!epilog)
-	{
-	  dump_printf_loc (MSG_MISSED_OPTIMIZATION, loop_loc,
-			   "slpeel_tree_duplicate_loop_to_edge_cfg failed.\n");
-	  gcc_unreachable ();
-	}
+      gcc_assert (epilog);
+
       epilog->force_vectorize = false;
       slpeel_update_phi_nodes_for_loops (loop_vinfo, loop, epilog, false);
 
@@ -3433,7 +3570,7 @@ vect_loop_versioning (loop_vec_info loop_vinfo,
   tree cost_name = NULL_TREE;
   profile_probability prob2 = profile_probability::uninitialized ();
   if (cond_expr
-      && !integer_truep (cond_expr)
+      && EXPR_P (cond_expr)
       && (version_niter
 	  || version_align
 	  || version_alias
@@ -3548,7 +3685,7 @@ vect_loop_versioning (loop_vec_info loop_vinfo,
     {
       gcc_assert (scalar_loop);
       condition_bb = gimple_bb (loop_vectorized_call);
-      cond = as_a <gcond *> (last_stmt (condition_bb));
+      cond = as_a <gcond *> (*gsi_last_bb (condition_bb));
       gimple_cond_set_condition_from_tree (cond, cond_expr);
       update_stmt (cond);
 
@@ -3667,6 +3804,7 @@ vect_loop_versioning (loop_vec_info loop_vinfo,
   if (cost_name && TREE_CODE (cost_name) == SSA_NAME)
     {
       gimple *def = SSA_NAME_DEF_STMT (cost_name);
+      gcc_assert (gimple_bb (def) == condition_bb);
       /* All uses of the cost check are 'true' after the check we
 	 are going to insert.  */
       replace_uses_by (cost_name, boolean_true_node);

@@ -48,8 +48,6 @@
   UNSPEC_EH_RETURN
 
   ;; Bit operation
-  UNSPEC_BYTEPICK_W
-  UNSPEC_BYTEPICK_D
   UNSPEC_BITREV_4B
   UNSPEC_BITREV_8B
 
@@ -544,6 +542,27 @@
 				      (UNSPEC_FTINTRM "0")
 				      (UNSPEC_FTINTRP "0")])
 
+;; Iterator and attributes for bytepick.d
+(define_int_iterator bytepick_w_ashift_amount [8 16 24])
+(define_int_attr bytepick_w_lshiftrt_amount [(8 "24")
+					     (16 "16")
+					     (24 "8")])
+(define_int_iterator bytepick_d_ashift_amount [8 16 24 32 40 48 56])
+(define_int_attr bytepick_d_lshiftrt_amount [(8 "56")
+					     (16 "48")
+					     (24 "40")
+					     (32 "32")
+					     (40 "24")
+					     (48 "16")
+					     (56 "8")])
+(define_int_attr bytepick_imm [(8 "1")
+				 (16 "2")
+				 (24 "3")
+				 (32 "4")
+				 (40 "5")
+				 (48 "6")
+				 (56 "7")])
+
 ;;
 ;;  ....................
 ;;
@@ -579,24 +598,64 @@
   [(set_attr "type" "fadd")
    (set_attr "mode" "<UNITMODE>")])
 
-(define_insn "add<mode>3"
-  [(set (match_operand:GPR 0 "register_operand" "=r,r")
-	(plus:GPR (match_operand:GPR 1 "register_operand" "r,r")
-		  (match_operand:GPR 2 "arith_operand" "r,I")))]
+(define_insn_and_split "add<mode>3"
+  [(set (match_operand:GPR 0 "register_operand" "=r,r,r,r,r,r,r")
+	(plus:GPR (match_operand:GPR 1 "register_operand" "r,r,r,r,r,r,r")
+		  (match_operand:GPR 2 "plus_<mode>_operand"
+				       "r,I,La,Lb,Lc,Ld,Le")))]
   ""
-  "add%i2.<d>\t%0,%1,%2";
+  "@
+   add.<d>\t%0,%1,%2
+   addi.<d>\t%0,%1,%2
+   #
+   * operands[2] = GEN_INT (INTVAL (operands[2]) / 65536); \
+     return \"addu16i.d\t%0,%1,%2\";
+   #
+   #
+   #"
+  "CONST_INT_P (operands[2]) && !IMM12_INT (operands[2]) \
+   && !ADDU16I_OPERAND (INTVAL (operands[2]))"
+  [(set (match_dup 0) (plus:GPR (match_dup 1) (match_dup 3)))
+   (set (match_dup 0) (plus:GPR (match_dup 0) (match_dup 4)))]
+  {
+    loongarch_split_plus_constant (&operands[2], <MODE>mode);
+  }
   [(set_attr "alu_type" "add")
-   (set_attr "mode" "<MODE>")])
+   (set_attr "mode" "<MODE>")
+   (set_attr "insn_count" "1,1,2,1,2,2,2")
+   (set (attr "enabled")
+      (cond
+	[(match_test "<MODE>mode != DImode && which_alternative == 4")
+	 (const_string "no")
+	 (match_test "<MODE>mode != DImode && which_alternative == 5")
+	 (const_string "no")
+	 (match_test "<MODE>mode != SImode && which_alternative == 6")
+	 (const_string "no")]
+	(const_string "yes")))])
 
-(define_insn "*addsi3_extended"
-  [(set (match_operand:DI 0 "register_operand" "=r,r")
+(define_insn_and_split "*addsi3_extended"
+  [(set (match_operand:DI 0 "register_operand" "=r,r,r,r")
 	(sign_extend:DI
-	     (plus:SI (match_operand:SI 1 "register_operand" "r,r")
-		      (match_operand:SI 2 "arith_operand" "r,I"))))]
+	     (plus:SI (match_operand:SI 1 "register_operand" "r,r,r,r")
+		      (match_operand:SI 2 "plus_si_extend_operand"
+					  "r,I,La,Le"))))]
   "TARGET_64BIT"
-  "add%i2.w\t%0,%1,%2"
+  "@
+   add.w\t%0,%1,%2
+   addi.w\t%0,%1,%2
+   #
+   #"
+  "CONST_INT_P (operands[2]) && !IMM12_INT (operands[2])"
+  [(set (subreg:SI (match_dup 0) 0) (plus:SI (match_dup 1) (match_dup 3)))
+   (set (match_dup 0)
+	(sign_extend:DI (plus:SI (subreg:SI (match_dup 0) 0)
+				 (match_dup 4))))]
+  {
+    loongarch_split_plus_constant (&operands[2], SImode);
+  }
   [(set_attr "alu_type" "add")
-   (set_attr "mode" "SI")])
+   (set_attr "mode" "SI")
+   (set_attr "insn_count" "1,1,2,2")])
 
 
 ;;
@@ -2429,7 +2488,8 @@
   ""
 {
   if (TARGET_DO_OPTIMIZE_BLOCK_MOVE_P
-      && loongarch_expand_block_move (operands[0], operands[1], operands[2]))
+      && loongarch_expand_block_move (operands[0], operands[1],
+				      operands[2], operands[3]))
     DONE;
   else
     FAIL;
@@ -3364,24 +3424,35 @@
   [(set_attr "type" "unknown")
    (set_attr "mode" "<MODE>")])
 
-(define_insn "bytepick_w"
+(define_insn "bytepick_w_<bytepick_imm>"
   [(set (match_operand:SI 0 "register_operand" "=r")
-	(unspec:SI [(match_operand:SI 1 "register_operand" "r")
-		    (match_operand:SI 2 "register_operand" "r")
-		    (match_operand:SI 3 "const_0_to_3_operand" "n")]
-		    UNSPEC_BYTEPICK_W))]
+	(ior:SI (lshiftrt (match_operand:SI 1 "register_operand" "r")
+			  (const_int <bytepick_w_lshiftrt_amount>))
+		(ashift (match_operand:SI 2 "register_operand" "r")
+			(const_int bytepick_w_ashift_amount))))]
   ""
-  "bytepick.w\t%0,%1,%2,%z3"
+  "bytepick.w\t%0,%1,%2,<bytepick_imm>"
   [(set_attr "mode" "SI")])
 
-(define_insn "bytepick_d"
+(define_insn "bytepick_w_<bytepick_imm>_extend"
   [(set (match_operand:DI 0 "register_operand" "=r")
-	(unspec:DI [(match_operand:DI 1 "register_operand" "r")
-		    (match_operand:DI 2 "register_operand" "r")
-		    (match_operand:DI 3 "const_0_to_7_operand" "n")]
-		    UNSPEC_BYTEPICK_D))]
-  ""
-  "bytepick.d\t%0,%1,%2,%z3"
+	(sign_extend:DI
+	  (ior:SI (lshiftrt (match_operand:SI 1 "register_operand" "r")
+			    (const_int <bytepick_w_lshiftrt_amount>))
+		  (ashift (match_operand:SI 2 "register_operand" "r")
+			  (const_int bytepick_w_ashift_amount)))))]
+  "TARGET_64BIT"
+  "bytepick.w\t%0,%1,%2,<bytepick_imm>"
+  [(set_attr "mode" "SI")])
+
+(define_insn "bytepick_d_<bytepick_imm>"
+  [(set (match_operand:DI 0 "register_operand" "=r")
+	(ior:DI (lshiftrt (match_operand:DI 1 "register_operand" "r")
+			  (const_int <bytepick_d_lshiftrt_amount>))
+		(ashift (match_operand:DI 2 "register_operand" "r")
+			(const_int bytepick_d_ashift_amount))))]
+  "TARGET_64BIT"
+  "bytepick.d\t%0,%1,%2,<bytepick_imm>"
   [(set_attr "mode" "DI")])
 
 (define_insn "bitrev_4b"

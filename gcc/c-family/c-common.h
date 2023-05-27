@@ -790,7 +790,7 @@ extern bool override_libcpp_locations;
 inline bool
 gnu_vector_type_p (const_tree type)
 {
-  return TREE_CODE (type) == VECTOR_TYPE && !TYPE_INDIVISIBLE_P (type);
+  return VECTOR_TYPE_P (type) && !TYPE_INDIVISIBLE_P (type);
 }
 
 struct visibility_flags
@@ -907,6 +907,7 @@ extern tree fold_for_warn (tree);
 extern tree c_common_get_narrower (tree, int *);
 extern bool get_attribute_operand (tree, unsigned HOST_WIDE_INT *);
 extern void c_common_finalize_early_debug (void);
+extern unsigned int c_strict_flex_array_level_of (tree);
 extern bool c_option_is_from_cpp_diagnostics (int);
 
 /* Used by convert_and_check; in front ends.  */
@@ -923,7 +924,7 @@ extern tree shorten_binary_op (tree result_type, tree op0, tree op1, bool bitwis
    minimum or op1 is not -1, because e.g. (long long) INT_MIN / -1 is
    well defined INT_MAX + 1LL if long long is wider than int, but INT_MIN / -1
    is UB.  */
-static inline bool
+inline bool
 may_shorten_divmod (tree op0, tree op1)
 {
   tree type0 = TREE_TYPE (op0);
@@ -1101,6 +1102,7 @@ extern tree lookup_label (tree);
 extern tree lookup_name (tree);
 extern bool lvalue_p (const_tree);
 extern int maybe_adjust_arg_pos_for_attribute (const_tree);
+extern bool instantiation_dependent_expression_p (tree);
 
 extern bool vector_targets_convertible_p (const_tree t1, const_tree t2);
 extern bool vector_types_convertible_p (const_tree t1, const_tree t2, bool emit_lax_note);
@@ -1326,7 +1328,7 @@ extern const struct c_omp_directive *c_omp_categorize_directive (const char *,
 								 const char *);
 
 /* Return next tree in the chain for chain_next walking of tree nodes.  */
-static inline tree
+inline tree
 c_tree_chain_next (tree t)
 {
   /* TREE_CHAIN of a type is TYPE_STUB_DECL, which is different
@@ -1522,7 +1524,7 @@ extern void warn_for_multistatement_macros (location_t, location_t,
 
 extern void check_for_xor_used_as_pow (location_t lhs_loc, tree lhs_val,
 				       location_t operator_loc,
-				       tree rhs_val);
+				       location_t rhs_loc, tree rhs_val);
 
 /* In c-attribs.cc.  */
 extern bool attribute_takes_identifier_p (const_tree);

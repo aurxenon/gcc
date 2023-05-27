@@ -1632,11 +1632,35 @@ topo_visit (constraint_graph_t graph, struct topo_info *ti,
   if (graph->succs[n])
     EXECUTE_IF_SET_IN_BITMAP (graph->succs[n], 0, j, bi)
       {
-	if (!bitmap_bit_p (ti->visited, j))
-	  topo_visit (graph, ti, j);
+	unsigned k = find (j);
+	if (!bitmap_bit_p (ti->visited, k))
+	  topo_visit (graph, ti, k);
       }
 
   ti->topo_order.safe_push (n);
+}
+
+/* Add a copy edge FROM -> TO, optimizing special cases.  Returns TRUE
+   if the solution of TO changed.  */
+
+static bool
+solve_add_graph_edge (constraint_graph_t graph, unsigned int to,
+		      unsigned int from)
+{
+  /* Adding edges from the special vars is pointless.
+     They don't have sets that can change.  */
+  if (get_varinfo (from)->is_special_var)
+    return bitmap_ior_into (get_varinfo (to)->solution,
+			    get_varinfo (from)->solution);
+  /* Merging the solution from ESCAPED needlessly increases
+     the set.  Use ESCAPED as representative instead.  */
+  else if (from == find (escaped_id))
+    return bitmap_set_bit (get_varinfo (to)->solution, escaped_id);
+  else if (get_varinfo (from)->may_have_pointers
+	   && add_graph_edge (graph, to, from))
+    return bitmap_ior_into (get_varinfo (to)->solution,
+			    get_varinfo (from)->solution);
+  return false;
 }
 
 /* Process a constraint C that represents x = *(y + off), using DELTA as the
@@ -1699,17 +1723,7 @@ do_sd_constraint (constraint_graph_t graph, constraint_t c,
 	{
 	  t = find (v->id);
 
-	  /* Adding edges from the special vars is pointless.
-	     They don't have sets that can change.  */
-	  if (get_varinfo (t)->is_special_var)
-	    flag |= bitmap_ior_into (sol, get_varinfo (t)->solution);
-	  /* Merging the solution from ESCAPED needlessly increases
-	     the set.  Use ESCAPED as representative instead.  */
-	  else if (v->id == escaped_id)
-	    flag |= bitmap_set_bit (sol, escaped_id);
-	  else if (v->may_have_pointers
-		   && add_graph_edge (graph, lhs, t))
-	    flag |= bitmap_ior_into (sol, get_varinfo (t)->solution);
+	  flag |= solve_add_graph_edge (graph, lhs, t);
 
 	  if (v->is_full_var
 	      || v->next == 0)
@@ -1723,10 +1737,7 @@ do_sd_constraint (constraint_graph_t graph, constraint_t c,
 done:
   /* If the LHS solution changed, mark the var as changed.  */
   if (flag)
-    {
-      get_varinfo (lhs)->solution = sol;
-      bitmap_set_bit (changed, lhs);
-    }
+    bitmap_set_bit (changed, lhs);
 }
 
 /* Process a constraint C that represents *(x + off) = y using DELTA
@@ -1756,11 +1767,8 @@ do_ds_constraint (constraint_t c, bitmap delta, bitmap *expanded_delta)
   if (bitmap_bit_p (delta, anything_id))
     {
       unsigned t = find (storedanything_id);
-      if (add_graph_edge (graph, t, rhs))
-	{
-	  if (bitmap_ior_into (get_varinfo (t)->solution, sol))
-	    bitmap_set_bit (changed, t);
-	}
+      if (solve_add_graph_edge (graph, t, rhs))
+	bitmap_set_bit (changed, t);
       return;
     }
 
@@ -1814,8 +1822,8 @@ do_ds_constraint (constraint_t c, bitmap delta, bitmap *expanded_delta)
 		break;
 
 	      t = find (v->id);
-	      if (add_graph_edge (graph, t, rhs)
-		  && bitmap_ior_into (get_varinfo (t)->solution, sol))
+
+	      if (solve_add_graph_edge  (graph, t, rhs))
 		bitmap_set_bit (changed, t);
 	    }
 
@@ -2775,8 +2783,15 @@ solve_graph (constraint_graph_t graph)
 	    continue;
 
 	  /* If the node has changed, we need to process the
-	     complex constraints and outgoing edges again.  */
-	  if (bitmap_clear_bit (changed, i))
+	     complex constraints and outgoing edges again.  For complex
+	     constraints that modify i itself, like the common group of
+	       callarg = callarg + UNKNOWN;
+	       callarg = *callarg + UNKNOWN;
+	       *callarg = callescape;
+	     make sure to iterate immediately because that maximizes
+	     cache reuse and expands the graph quickest, leading to
+	     better visitation order in the next iteration.  */
+	  while (bitmap_clear_bit (changed, i))
 	    {
 	      unsigned int j;
 	      constraint_t c;
@@ -2794,7 +2809,7 @@ solve_graph (constraint_graph_t graph)
 		     ???  But we shouldn't ended up with "changed" set ...  */
 		  if (vi->oldsolution
 		      && bitmap_bit_p (vi->oldsolution, anything_id))
-		    continue;
+		    break;
 		  bitmap_copy (pts, get_varinfo (find (anything_id))->solution);
 		}
 	      else if (vi->oldsolution)
@@ -2803,7 +2818,7 @@ solve_graph (constraint_graph_t graph)
 		bitmap_copy (pts, vi->solution);
 
 	      if (bitmap_empty_p (pts))
-		continue;
+		break;
 
 	      if (vi->oldsolution)
 		bitmap_ior_into (vi->oldsolution, pts);
@@ -2868,19 +2883,22 @@ solve_graph (constraint_graph_t graph)
 			}
 		      /* Don't try to propagate to ourselves.  */
 		      if (to == i)
-			continue;
-
-		      bitmap tmp = get_varinfo (to)->solution;
-		      bool flag = false;
-
-		      /* If we propagate from ESCAPED use ESCAPED as
-		         placeholder.  */
+			{
+			  to_remove = j;
+			  continue;
+			}
+		      /* Early node unification can lead to edges from
+			 escaped - remove them.  */
 		      if (i == eff_escaped_id)
-			flag = bitmap_set_bit (tmp, escaped_id);
-		      else
-			flag = bitmap_ior_into (tmp, pts);
+			{
+			  to_remove = j;
+			  if (bitmap_set_bit (get_varinfo (to)->solution,
+					      escaped_id))
+			    bitmap_set_bit (changed, to);
+			  continue;
+			}
 
-		      if (flag)
+		      if (bitmap_ior_into (get_varinfo (to)->solution, pts))
 			bitmap_set_bit (changed, to);
 		    }
 		  if (to_remove != ~0U)
@@ -4408,17 +4426,17 @@ handle_lhs_call (gcall *stmt, tree lhs, int flags, vec<ce_s> &rhsc,
       && (flags & ERF_RETURN_ARG_MASK) < gimple_call_num_args (stmt))
     {
       tree arg;
-      rhsc.create (0);
+      rhsc.truncate (0);
       arg = gimple_call_arg (stmt, flags & ERF_RETURN_ARG_MASK);
       get_constraint_for (arg, &rhsc);
       process_all_all_constraints (lhsc, rhsc);
-      rhsc.release ();
+      rhsc.truncate (0);
     }
   else if (flags & ERF_NOALIAS)
     {
       varinfo_t vi;
       struct constraint_expr tmpc;
-      rhsc.create (0);
+      rhsc.truncate (0);
       vi = make_heapvar ("HEAP", true);
       /* We are marking allocated storage local, we deal with it becoming
          global by escaping and setting of vars_contains_escaped_heap.  */
@@ -4435,7 +4453,7 @@ handle_lhs_call (gcall *stmt, tree lhs, int flags, vec<ce_s> &rhsc,
       tmpc.type = ADDRESSOF;
       rhsc.safe_push (tmpc);
       process_all_all_constraints (lhsc, rhsc);
-      rhsc.release ();
+      rhsc.truncate (0);
     }
   else
     process_all_all_constraints (lhsc, rhsc);
@@ -5813,8 +5831,7 @@ type_must_have_pointers (tree type)
 
   /* A function or method can have pointers as arguments, so track
      those separately.  */
-  if (TREE_CODE (type) == FUNCTION_TYPE
-      || TREE_CODE (type) == METHOD_TYPE)
+  if (FUNC_OR_METHOD_TYPE_P (type))
     return true;
 
   return false;
@@ -7130,33 +7147,33 @@ pt_solutions_intersect (struct pt_solution *pt1, struct pt_solution *pt2)
   return res;
 }
 
+/* Dump stats information to OUTFILE.  */
+
+static void
+dump_sa_stats (FILE *outfile)
+{
+  fprintf (outfile, "Points-to Stats:\n");
+  fprintf (outfile, "Total vars:               %d\n", stats.total_vars);
+  fprintf (outfile, "Non-pointer vars:          %d\n",
+	   stats.nonpointer_vars);
+  fprintf (outfile, "Statically unified vars:  %d\n",
+	   stats.unified_vars_static);
+  fprintf (outfile, "Dynamically unified vars: %d\n",
+	   stats.unified_vars_dynamic);
+  fprintf (outfile, "Iterations:               %d\n", stats.iterations);
+  fprintf (outfile, "Number of edges:          %d\n", stats.num_edges);
+  fprintf (outfile, "Number of implicit edges: %d\n",
+	   stats.num_implicit_edges);
+}
 
 /* Dump points-to information to OUTFILE.  */
 
 static void
 dump_sa_points_to_info (FILE *outfile)
 {
-  unsigned int i;
-
   fprintf (outfile, "\nPoints-to sets\n\n");
 
-  if (dump_flags & TDF_STATS)
-    {
-      fprintf (outfile, "Stats:\n");
-      fprintf (outfile, "Total vars:               %d\n", stats.total_vars);
-      fprintf (outfile, "Non-pointer vars:          %d\n",
-	       stats.nonpointer_vars);
-      fprintf (outfile, "Statically unified vars:  %d\n",
-	       stats.unified_vars_static);
-      fprintf (outfile, "Dynamically unified vars: %d\n",
-	       stats.unified_vars_dynamic);
-      fprintf (outfile, "Iterations:               %d\n", stats.iterations);
-      fprintf (outfile, "Number of edges:          %d\n", stats.num_edges);
-      fprintf (outfile, "Number of implicit edges: %d\n",
-	       stats.num_implicit_edges);
-    }
-
-  for (i = 1; i < varmap.length (); i++)
+  for (unsigned i = 1; i < varmap.length (); i++)
     {
       varinfo_t vi = get_varinfo (i);
       if (!vi->may_have_pointers)
@@ -7537,7 +7554,7 @@ compute_points_to_sets (void)
 	}
     }
 
-  if (dump_file)
+  if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file, "Points-to analysis\n\nConstraints:\n\n");
       dump_constraints (dump_file, 0);
@@ -7550,7 +7567,7 @@ compute_points_to_sets (void)
   edge_iterator ei;
   edge e;
   FOR_EACH_EDGE (e, ei, EXIT_BLOCK_PTR_FOR_FN (cfun)->preds)
-    if (greturn *ret = safe_dyn_cast <greturn *> (last_stmt (e->src)))
+    if (greturn *ret = safe_dyn_cast <greturn *> (*gsi_last_bb (e->src)))
       {
 	tree val = gimple_return_retval (ret);
 	/* ???  Easy to handle simple indirections with some work.
@@ -7610,7 +7627,10 @@ compute_points_to_sets (void)
 	BITMAP_FREE (new_delta);
       }
 
-  if (dump_file)
+  if (dump_file && (dump_flags & TDF_STATS))
+    dump_sa_stats (dump_file);
+
+  if (dump_file && (dump_flags & TDF_DETAILS))
     dump_sa_points_to_info (dump_file);
 
   /* Compute the points-to set for ESCAPED used for call-clobber analysis.  */
@@ -8032,7 +8052,8 @@ compute_may_aliases (void)
 		   "because IPA points-to information is available.\n\n");
 
 	  /* But still dump what we have remaining it.  */
-	  dump_alias_info (dump_file);
+	  if (dump_flags & (TDF_DETAILS|TDF_ALIAS))
+	    dump_alias_info (dump_file);
 	}
 
       return 0;
@@ -8044,7 +8065,7 @@ compute_may_aliases (void)
   compute_points_to_sets ();
 
   /* Debugging dumps.  */
-  if (dump_file)
+  if (dump_file && (dump_flags & (TDF_DETAILS|TDF_ALIAS)))
     dump_alias_info (dump_file);
 
   /* Compute restrict-based memory disambiguations.  */
@@ -8305,7 +8326,7 @@ ipa_pta_execute (void)
       fprintf (dump_file, "\n");
     }
 
-  if (dump_file)
+  if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file, "Generating generic constraints\n\n");
       dump_constraints (dump_file, from);
@@ -8344,7 +8365,7 @@ ipa_pta_execute (void)
       vi = create_function_info_for (node->decl,
 				     alias_get_name (node->decl), false,
 				     nonlocal_p);
-      if (dump_file
+      if (dump_file && (dump_flags & TDF_DETAILS)
 	  && from != constraints.length ())
 	{
 	  fprintf (dump_file,
@@ -8385,7 +8406,7 @@ ipa_pta_execute (void)
 	vi->is_ipa_escape_point = true;
     }
 
-  if (dump_file
+  if (dump_file && (dump_flags & TDF_DETAILS)
       && from != constraints.length ())
     {
       fprintf (dump_file,
@@ -8442,7 +8463,7 @@ ipa_pta_execute (void)
 	    }
 	}
 
-      if (dump_file)
+      if (dump_file && (dump_flags & TDF_DETAILS))
 	{
 	  fprintf (dump_file, "\n");
 	  dump_constraints (dump_file, from);
@@ -8454,7 +8475,10 @@ ipa_pta_execute (void)
   /* From the constraints compute the points-to sets.  */
   solve_constraints ();
 
-  if (dump_file)
+  if (dump_file && (dump_flags & TDF_STATS))
+    dump_sa_stats (dump_file);
+
+  if (dump_file && (dump_flags & TDF_DETAILS))
     dump_sa_points_to_info (dump_file);
 
   /* Now post-process solutions to handle locals from different

@@ -430,16 +430,7 @@ gimple_build_builtin_unreachable (location_t loc)
 {
   tree data = NULL_TREE;
   tree fn = sanitize_unreachable_fn (&data, loc);
-  gcall *g;
-  if (DECL_FUNCTION_CODE (fn) != BUILT_IN_TRAP)
-    g = gimple_build_call (fn, data != NULL_TREE, data);
-  else
-    {
-      /* Instead of __builtin_trap use .TRAP, so that it doesn't
-	 need vops.  */
-      gcc_checking_assert (data == NULL_TREE);
-      g = gimple_build_call_internal (IFN_TRAP, 0);
-    }
+  gcall *g = gimple_build_call (fn, data != NULL_TREE, data);
   gimple_call_set_ctrl_altering (g, true);
   gimple_set_location (g, loc);
   return g;
@@ -1796,6 +1787,26 @@ gimple_assign_unary_nop_p (gimple *gs)
           && (TYPE_MODE (TREE_TYPE (gimple_assign_lhs (gs)))
               == TYPE_MODE (TREE_TYPE (gimple_assign_rhs1 (gs)))));
 }
+
+/* Return true if GS is an assignment that loads from its rhs1.  */
+
+bool
+gimple_assign_load_p (const gimple *gs)
+{
+  tree rhs;
+  if (!gimple_assign_single_p (gs))
+    return false;
+  rhs = gimple_assign_rhs1 (gs);
+  if (TREE_CODE (rhs) == WITH_SIZE_EXPR)
+    return true;
+  if (handled_component_p (rhs))
+    rhs = TREE_OPERAND (rhs, 0);
+  return (handled_component_p (rhs)
+	  || DECL_P (rhs)
+	  || TREE_CODE (rhs) == MEM_REF
+	  || TREE_CODE (rhs) == TARGET_MEM_REF);
+}
+
 
 /* Set BB to be the basic block holding G.  */
 

@@ -53,6 +53,8 @@ along with GCC; see the file COPYING3.  If not see
        used any more and VL operand of VSETVL instruction if it is not used by
        any non-debug instructions.
 
+    -  Phase 6 - Propagate AVL between vsetvl instructions.
+
     Implementation:
 
     -  The subroutine of optimize == 0 is simple_vsetvl.
@@ -61,7 +63,16 @@ along with GCC; see the file COPYING3.  If not see
 
     -  The subroutine of optimize > 0 is lazy_vsetvl.
        This function optimize vsetvl insertion process by
-       lazy code motion (LCM) layering on RTL_SSA.  */
+       lazy code motion (LCM) layering on RTL_SSA.
+
+    -  get_avl (), get_insn (), get_avl_source ():
+
+	1. get_insn () is the current instruction, find_access (get_insn
+   ())->def is the same as get_avl_source () if get_insn () demand VL.
+	2. If get_avl () is non-VLMAX REG, get_avl () == get_avl_source
+   ()->regno ().
+	3. get_avl_source ()->regno () is the REGNO that we backward propagate.
+ */
 
 #define IN_TARGET_CODE 1
 #define INCLUDE_ALGORITHM
@@ -91,6 +102,10 @@ along with GCC; see the file COPYING3.  If not see
 
 using namespace rtl_ssa;
 using namespace riscv_vector;
+
+static CONSTEXPR const unsigned ALL_SEW[] = {8, 16, 32, 64};
+static CONSTEXPR const vlmul_type ALL_LMUL[]
+  = {LMUL_1, LMUL_2, LMUL_4, LMUL_8, LMUL_F8, LMUL_F4, LMUL_F2};
 
 DEBUG_FUNCTION void
 debug (const vector_insn_info *info)
@@ -163,6 +178,40 @@ valid_sew_p (size_t sew)
   return exact_log2 (sew) && sew >= 8 && sew <= 64;
 }
 
+/* Return true if the instruction ignores VLMUL field of VTYPE.  */
+static bool
+ignore_vlmul_insn_p (rtx_insn *rinsn)
+{
+  return get_attr_type (rinsn) == TYPE_VIMOVVX
+	 || get_attr_type (rinsn) == TYPE_VFMOVVF
+	 || get_attr_type (rinsn) == TYPE_VIMOVXV
+	 || get_attr_type (rinsn) == TYPE_VFMOVFV;
+}
+
+/* Return true if the instruction is scalar move instruction.  */
+static bool
+scalar_move_insn_p (rtx_insn *rinsn)
+{
+  return get_attr_type (rinsn) == TYPE_VIMOVXV
+	 || get_attr_type (rinsn) == TYPE_VFMOVFV;
+}
+
+/* Return true if the instruction is fault first load instruction.  */
+static bool
+fault_first_load_p (rtx_insn *rinsn)
+{
+  return recog_memoized (rinsn) >= 0
+	 && (get_attr_type (rinsn) == TYPE_VLDFF
+	     || get_attr_type (rinsn) == TYPE_VLSEGDFF);
+}
+
+/* Return true if the instruction is read vl instruction.  */
+static bool
+read_vl_insn_p (rtx_insn *rinsn)
+{
+  return recog_memoized (rinsn) >= 0 && get_attr_type (rinsn) == TYPE_RDVL;
+}
+
 /* Return true if it is a vsetvl instruction.  */
 static bool
 vector_config_insn_p (rtx_insn *rinsn)
@@ -174,8 +223,20 @@ vector_config_insn_p (rtx_insn *rinsn)
 static bool
 vsetvl_insn_p (rtx_insn *rinsn)
 {
+  if (!vector_config_insn_p (rinsn))
+    return false;
   return (INSN_CODE (rinsn) == CODE_FOR_vsetvldi
-	 || INSN_CODE (rinsn) == CODE_FOR_vsetvlsi);
+	  || INSN_CODE (rinsn) == CODE_FOR_vsetvlsi);
+}
+
+/* Return true if it is vsetvl zero, rs1.  */
+static bool
+vsetvl_discard_result_insn_p (rtx_insn *rinsn)
+{
+  if (!vector_config_insn_p (rinsn))
+    return false;
+  return (INSN_CODE (rinsn) == CODE_FOR_vsetvl_discard_resultdi
+	  || INSN_CODE (rinsn) == CODE_FOR_vsetvl_discard_resultsi);
 }
 
 static bool
@@ -187,18 +248,30 @@ real_insn_and_same_bb_p (const insn_info *insn, const bb_info *bb)
 static bool
 before_p (const insn_info *insn1, const insn_info *insn2)
 {
-  return insn1->compare_with (insn2) == -1;
+  return insn1->compare_with (insn2) < 0;
 }
 
-static bool
-reg_killed_by_bb_p (const bb_info *bb, rtx x)
+static insn_info *
+find_reg_killed_by (const bb_info *bb, rtx x)
 {
-  if (!x || vlmax_avl_p (x))
-    return false;
-  for (const insn_info *insn : bb->real_nondebug_insns ())
+  if (!x || vlmax_avl_p (x) || !REG_P (x))
+    return nullptr;
+  for (insn_info *insn : bb->reverse_real_nondebug_insns ())
     if (find_access (insn->defs (), REGNO (x)))
-      return true;
-  return false;
+      return insn;
+  return nullptr;
+}
+
+/* Helper function to get VL operand.  */
+static rtx
+get_vl (rtx_insn *rinsn)
+{
+  if (has_vl_op (rinsn))
+    {
+      extract_insn_cached (rinsn);
+      return recog_data.operand[get_attr_vl_op_idx (rinsn)];
+    }
+  return SET_DEST (XVECEXP (PATTERN (rinsn), 0, 0));
 }
 
 static bool
@@ -207,6 +280,8 @@ has_vsetvl_killed_avl_p (const bb_info *bb, const vector_insn_info &info)
   if (info.dirty_with_killed_avl_p ())
     {
       rtx avl = info.get_avl ();
+      if (vlmax_avl_p (avl))
+	return find_reg_killed_by (bb, info.get_avl_reg_rtx ()) != nullptr;
       for (const insn_info *insn : bb->reverse_real_nondebug_insns ())
 	{
 	  def_info *def = find_access (insn->defs (), REGNO (avl));
@@ -226,18 +301,6 @@ has_vsetvl_killed_avl_p (const bb_info *bb, const vector_insn_info &info)
 	}
     }
   return false;
-}
-
-/* Helper function to get VL operand.  */
-static rtx
-get_vl (rtx_insn *rinsn)
-{
-  if (has_vl_op (rinsn))
-    {
-      extract_insn_cached (rinsn);
-      return recog_data.operand[get_attr_vl_op_idx (rinsn)];
-    }
-  return SET_DEST (XVECEXP (PATTERN (rinsn), 0, 0));
 }
 
 /* An "anticipatable occurrence" is one that is the first occurrence in the
@@ -271,8 +334,7 @@ anticipatable_occurrence_p (const bb_info *bb, const vector_insn_info dem)
       /* rs1 (avl) are not modified in the basic block prior to the VSETVL.  */
       if (!vlmax_avl_p (dem.get_avl ()))
 	{
-	  set_info *set
-	    = find_access (insn->uses (), REGNO (dem.get_avl ()))->def ();
+	  set_info *set = dem.get_avl_source ();
 	  /* If it's undefined, it's not anticipatable conservatively.  */
 	  if (!set)
 	    return false;
@@ -338,6 +400,8 @@ available_occurrence_p (const bb_info *bb, const vector_insn_info dem)
 	  for (const insn_info *i = insn; real_insn_and_same_bb_p (i, bb);
 	       i = i->next_nondebug_insn ())
 	    {
+	      if (read_vl_insn_p (i->rtl ()))
+		continue;
 	      /* rs1 (avl) are not modified by following statements in
 		 the basic block.  */
 	      if (find_access (i->defs (), REGNO (dem.get_avl ())))
@@ -352,77 +416,80 @@ available_occurrence_p (const bb_info *bb, const vector_insn_info dem)
   return true;
 }
 
-/* Return true if the block is worthwhile backward propagation.  */
 static bool
-backward_propagate_worthwhile_p (const basic_block cfg_bb,
-				 const vector_block_info block_info)
+insn_should_be_added_p (const insn_info *insn, unsigned int types)
 {
-  if (loop_basic_block_p (cfg_bb))
+  if (insn->is_real () && (types & REAL_SET))
+    return true;
+  if (insn->is_phi () && (types & PHI_SET))
+    return true;
+  if (insn->is_bb_head () && (types & BB_HEAD_SET))
+    return true;
+  if (insn->is_bb_end () && (types & BB_END_SET))
+    return true;
+  return false;
+}
+
+/* Recursively find all define instructions. The kind of instruction is
+   specified by the DEF_TYPE.  */
+static hash_set<set_info *>
+get_all_sets (phi_info *phi, unsigned int types)
+{
+  hash_set<set_info *> insns;
+  auto_vec<phi_info *> work_list;
+  hash_set<phi_info *> visited_list;
+  if (!phi)
+    return hash_set<set_info *> ();
+  work_list.safe_push (phi);
+
+  while (!work_list.is_empty ())
     {
-      if (block_info.reaching_out.valid_or_dirty_p ())
+      phi_info *phi = work_list.pop ();
+      visited_list.add (phi);
+      for (use_info *use : phi->inputs ())
 	{
-	  if (block_info.local_dem.compatible_p (block_info.reaching_out))
+	  def_info *def = use->def ();
+	  set_info *set = safe_dyn_cast<set_info *> (def);
+	  if (!set)
+	    return hash_set<set_info *> ();
+
+	  gcc_assert (!set->insn ()->is_debug_insn ());
+
+	  if (insn_should_be_added_p (set->insn (), types))
+	    insns.add (set);
+	  if (set->insn ()->is_phi ())
 	    {
-	      /* Case 1 (Can backward propagate):
-		 ....
-		 bb0:
-		 ...
-		 for (int i = 0; i < n; i++)
-		   {
-		     vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
-		     __riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
-		   }
-		 The local_dem is compatible with reaching_out. Such case is
-		 worthwhile backward propagation.  */
-	      return true;
+	      phi_info *new_phi = as_a<phi_info *> (set);
+	      if (!visited_list.contains (new_phi))
+		work_list.safe_push (new_phi);
 	    }
-	  else
-	    {
-	      /* Case 2 (Don't backward propagate):
-		    ....
-		    bb0:
-		    ...
-		    for (int i = 0; i < n; i++)
-		      {
-			vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
-			__riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
-			vint16mf2_t v2 = __riscv_vle16_v_i16mf2 (in + i + 6, 8);
-			__riscv_vse16_v_i16mf2 (out + i + 6, v, 8);
-		      }
-		 The local_dem is incompatible with reaching_out.
-		 It makes no sense to backward propagate the local_dem since we
-		 can't avoid VSETVL inside the loop.  */
-	      return false;
-	    }
-	}
-      else
-	{
-	  gcc_assert (block_info.reaching_out.unknown_p ());
-	  /* Case 3 (Don't backward propagate):
-		....
-		bb0:
-		...
-		for (int i = 0; i < n; i++)
-		  {
-		    vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
-		    __riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
-		    fn3 ();
-		  }
-	    The local_dem is VALID, but the reaching_out is UNKNOWN.
-	    It makes no sense to backward propagate the local_dem since we
-	    can't avoid VSETVL inside the loop.  */
-	  return false;
 	}
     }
+  return insns;
+}
 
-  return true;
+static hash_set<set_info *>
+get_all_sets (set_info *set, bool /* get_real_inst */ real_p,
+	      bool /*get_phi*/ phi_p, bool /* get_function_parameter*/ param_p)
+{
+  if (real_p && phi_p && param_p)
+    return get_all_sets (safe_dyn_cast<phi_info *> (set),
+			 REAL_SET | PHI_SET | BB_HEAD_SET | BB_END_SET);
+
+  else if (real_p && param_p)
+    return get_all_sets (safe_dyn_cast<phi_info *> (set),
+			 REAL_SET | BB_HEAD_SET | BB_END_SET);
+
+  else if (real_p)
+    return get_all_sets (safe_dyn_cast<phi_info *> (set), REAL_SET);
+  return hash_set<set_info *> ();
 }
 
 /* Helper function to get AVL operand.  */
 static rtx
 get_avl (rtx_insn *rinsn)
 {
-  if (vsetvl_insn_p (rinsn))
+  if (vsetvl_insn_p (rinsn) || vsetvl_discard_result_insn_p (rinsn))
     return XVECEXP (SET_SRC (XVECEXP (PATTERN (rinsn), 0, 0)), 0, 0);
 
   if (!has_vl_op (rinsn))
@@ -433,44 +500,13 @@ get_avl (rtx_insn *rinsn)
   return recog_data.operand[get_attr_vl_op_idx (rinsn)];
 }
 
-/* Recursively find all real define instructions if it is a real instruction. */
-static hash_set<insn_info *>
-get_all_nonphi_defs (phi_info *phi)
+static set_info *
+get_same_bb_set (hash_set<set_info *> &sets, const basic_block cfg_bb)
 {
-  hash_set<insn_info *> insns;
-  auto_vec<phi_info *> work_list;
-  hash_set<phi_info *> visited_list;
-  if (!phi)
-    return insns;
-  work_list.safe_push (phi);
-
-  while (!work_list.is_empty ())
-    {
-      phi_info *phi = work_list.pop ();
-      visited_list.add (phi);
-      for (use_info *use : phi->inputs ())
-	{
-	  def_info *def = use->def ();
-	  if (!def)
-	    {
-	      /* if def is null, treat undefined */
-	      insns.empty ();
-	      return insns;
-	    }
-
-	  gcc_assert (!def->insn ()->is_debug_insn ());
-
-	  if (!def->insn ()->is_phi ())
-	    insns.add (def->insn ());
-	  if (def->insn ()->is_phi ())
-	    {
-	      phi_info *new_phi = as_a<phi_info *> (def);
-	      if (!visited_list.contains (new_phi))
-		work_list.safe_push (new_phi);
-	    }
-	}
-    }
-  return insns;
+  for (set_info *set : sets)
+    if (set->bb ()->cfg_bb () == cfg_bb)
+      return set;
+  return nullptr;
 }
 
 /* Recursively find all predecessor blocks for cfg_bb. */
@@ -500,10 +536,10 @@ get_all_predecessors (basic_block cfg_bb)
 
 /* Return true if there is an INSN in insns staying in the block BB.  */
 static bool
-any_insn_in_bb_p (hash_set<insn_info *> insns, const bb_info *bb)
+any_set_in_bb_p (hash_set<set_info *> sets, const bb_info *bb)
 {
-  for (const insn_info *insn : insns)
-    if (insn->bb ()->index () == bb->index ())
+  for (const set_info *set : sets)
+    if (set->bb ()->index () == bb->index ())
       return true;
   return false;
 }
@@ -579,9 +615,14 @@ has_vector_insn (function *fn)
 
 /* Emit vsetvl instruction.  */
 static rtx
-gen_vsetvl_pat (enum vsetvl_type insn_type, vl_vtype_info info, rtx vl)
+gen_vsetvl_pat (enum vsetvl_type insn_type, const vl_vtype_info &info, rtx vl)
 {
   rtx avl = info.get_avl ();
+  /* if optimization == 0 and the instruction is vmv.x.s/vfmv.f.s,
+     set the value of avl to (const_int 0) so that VSETVL PASS will
+     insert vsetvl correctly.*/
+  if (info.has_avl_no_reg ())
+    avl = GEN_INT (0);
   rtx sew = gen_int_mode (info.get_sew (), Pmode);
   rtx vlmul = gen_int_mode (info.get_vlmul (), Pmode);
   rtx ta = gen_int_mode (info.get_ta (), Pmode);
@@ -599,24 +640,29 @@ gen_vsetvl_pat (enum vsetvl_type insn_type, vl_vtype_info info, rtx vl)
 }
 
 static rtx
-gen_vsetvl_pat (rtx_insn *rinsn, const vector_insn_info info)
+gen_vsetvl_pat (rtx_insn *rinsn, const vector_insn_info &info)
 {
   rtx new_pat;
+  vl_vtype_info new_info = info;
+  if (info.get_insn () && info.get_insn ()->rtl ()
+      && fault_first_load_p (info.get_insn ()->rtl ()))
+    new_info.set_avl_info (
+      avl_info (get_avl (info.get_insn ()->rtl ()), nullptr));
   if (vsetvl_insn_p (rinsn) || vlmax_avl_p (info.get_avl ()))
     {
       rtx dest = get_vl (rinsn);
-      new_pat = gen_vsetvl_pat (VSETVL_NORMAL, info, dest);
+      new_pat = gen_vsetvl_pat (VSETVL_NORMAL, new_info, dest);
     }
   else if (INSN_CODE (rinsn) == CODE_FOR_vsetvl_vtype_change_only)
-    new_pat = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY, info, NULL_RTX);
+    new_pat = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY, new_info, NULL_RTX);
   else
-    new_pat = gen_vsetvl_pat (VSETVL_DISCARD_RESULT, info, NULL_RTX);
+    new_pat = gen_vsetvl_pat (VSETVL_DISCARD_RESULT, new_info, NULL_RTX);
   return new_pat;
 }
 
 static void
 emit_vsetvl_insn (enum vsetvl_type insn_type, enum emit_type emit_type,
-		  vl_vtype_info info, rtx vl, rtx_insn *rinsn)
+		  const vl_vtype_info &info, rtx vl, rtx_insn *rinsn)
 {
   rtx pat = gen_vsetvl_pat (insn_type, info, vl);
   if (dump_file)
@@ -647,7 +693,7 @@ eliminate_insn (rtx_insn *rinsn)
     delete_insn (rinsn);
 }
 
-static void
+static vsetvl_type
 insert_vsetvl (enum emit_type emit_type, rtx_insn *rinsn,
 	       const vector_insn_info &info, const vector_insn_info &prev_info)
 {
@@ -658,14 +704,14 @@ insert_vsetvl (enum emit_type emit_type, rtx_insn *rinsn,
     {
       emit_vsetvl_insn (VSETVL_VTYPE_CHANGE_ONLY, emit_type, info, NULL_RTX,
 			rinsn);
-      return;
+      return VSETVL_VTYPE_CHANGE_ONLY;
     }
 
   if (info.has_avl_imm ())
     {
       emit_vsetvl_insn (VSETVL_DISCARD_RESULT, emit_type, info, NULL_RTX,
 			rinsn);
-      return;
+      return VSETVL_DISCARD_RESULT;
     }
 
   if (info.has_avl_no_reg ())
@@ -677,14 +723,14 @@ insert_vsetvl (enum emit_type emit_type, rtx_insn *rinsn,
 	{
 	  emit_vsetvl_insn (VSETVL_VTYPE_CHANGE_ONLY, emit_type, info, NULL_RTX,
 			    rinsn);
-	  return;
+	  return VSETVL_VTYPE_CHANGE_ONLY;
 	}
       /* Otherwise use an AVL of 0 to avoid depending on previous vl.  */
       vl_vtype_info new_info = info;
       new_info.set_avl_info (avl_info (const0_rtx, nullptr));
       emit_vsetvl_insn (VSETVL_DISCARD_RESULT, emit_type, new_info, NULL_RTX,
 			rinsn);
-      return;
+      return VSETVL_DISCARD_RESULT;
     }
 
   /* Use X0 as the DestReg unless AVLReg is X0. We also need to change the
@@ -693,10 +739,10 @@ insert_vsetvl (enum emit_type emit_type, rtx_insn *rinsn,
   if (vlmax_avl_p (info.get_avl ()))
     {
       gcc_assert (has_vtype_op (rinsn) || vsetvl_insn_p (rinsn));
-      rtx vl_op = get_vl (rinsn);
+      rtx vl_op = info.get_avl_reg_rtx ();
       gcc_assert (!vlmax_avl_p (vl_op));
       emit_vsetvl_insn (VSETVL_NORMAL, emit_type, info, vl_op, rinsn);
-      return;
+      return VSETVL_NORMAL;
     }
 
   emit_vsetvl_insn (VSETVL_DISCARD_RESULT, emit_type, info, NULL_RTX, rinsn);
@@ -706,6 +752,7 @@ insert_vsetvl (enum emit_type emit_type, rtx_insn *rinsn,
       fprintf (dump_file, "Update VL/VTYPE info, previous info=");
       prev_info.dump (dump_file);
     }
+  return VSETVL_DISCARD_RESULT;
 }
 
 /* If X contains any LABEL_REF's, add REG_LABEL_OPERAND notes for them
@@ -833,14 +880,18 @@ insert_insn_end_basic_block (rtx_insn *rinsn, basic_block cfg_bb)
 static vl_vtype_info
 get_vl_vtype_info (const insn_info *insn)
 {
-  if (vector_config_insn_p (insn->rtl ()))
-    gcc_assert (vsetvl_insn_p (insn->rtl ())
-		&& "Can't handle X0, rs1 vsetvli yet");
-
   set_info *set = nullptr;
   rtx avl = ::get_avl (insn->rtl ());
-  if (avl && REG_P (avl) && !vlmax_avl_p (avl))
-    set = find_access (insn->uses (), REGNO (avl))->def ();
+  if (avl && REG_P (avl))
+    {
+      if (vlmax_avl_p (avl) && has_vl_op (insn->rtl ()))
+	set
+	  = find_access (insn->uses (), REGNO (get_vl (insn->rtl ())))->def ();
+      else if (!vlmax_avl_p (avl))
+	set = find_access (insn->uses (), REGNO (avl))->def ();
+      else
+	set = nullptr;
+    }
 
   uint8_t sew = get_sew (insn->rtl ());
   enum vlmul_type vlmul = get_vlmul (insn->rtl ());
@@ -888,6 +939,36 @@ change_insn (rtx_insn *rinsn, rtx new_pat)
     }
 }
 
+static const insn_info *
+get_forward_read_vl_insn (const insn_info *insn)
+{
+  const bb_info *bb = insn->bb ();
+  for (const insn_info *i = insn->next_nondebug_insn ();
+       real_insn_and_same_bb_p (i, bb); i = i->next_nondebug_insn ())
+    {
+      if (find_access (i->defs (), VL_REGNUM))
+	return nullptr;
+      if (read_vl_insn_p (i->rtl ()))
+	return i;
+    }
+  return nullptr;
+}
+
+static const insn_info *
+get_backward_fault_first_load_insn (const insn_info *insn)
+{
+  const bb_info *bb = insn->bb ();
+  for (const insn_info *i = insn->prev_nondebug_insn ();
+       real_insn_and_same_bb_p (i, bb); i = i->prev_nondebug_insn ())
+    {
+      if (fault_first_load_p (i->rtl ()))
+	return i;
+      if (find_access (i->defs (), VL_REGNUM))
+	return nullptr;
+    }
+  return nullptr;
+}
+
 static bool
 change_insn (function_info *ssa, insn_change change, insn_info *insn,
 	     rtx new_pat)
@@ -910,6 +991,46 @@ change_insn (function_info *ssa, insn_change change, insn_info *insn,
   /* These routines report failures themselves.  */
   if (!recog (attempt, change) || !change_is_worthwhile (change, false))
     return false;
+
+  /* Fix bug:
+      (insn 12 34 13 2 (set (reg:VNx8DI 120 v24 [orig:134 _1 ] [134])
+	(if_then_else:VNx8DI (unspec:VNx8BI [
+		    (const_vector:VNx8BI repeat [
+			    (const_int 1 [0x1])
+			])
+		    (const_int 0 [0])
+		    (const_int 2 [0x2]) repeated x2
+		    (const_int 0 [0])
+		    (reg:SI 66 vl)
+		    (reg:SI 67 vtype)
+		] UNSPEC_VPREDICATE)
+	    (plus:VNx8DI (reg/v:VNx8DI 104 v8 [orig:137 op1 ] [137])
+		(sign_extend:VNx8DI (vec_duplicate:VNx8SI (reg:SI 15 a5
+    [140])))) (unspec:VNx8DI [ (const_int 0 [0]) ] UNSPEC_VUNDEF))) "rvv.c":8:12
+    2784 {pred_single_widen_addsvnx8di_scalar} (expr_list:REG_EQUIV
+    (mem/c:VNx8DI (reg:DI 10 a0 [142]) [1 <retval>+0 S[64, 64] A128])
+	(expr_list:REG_EQUAL (if_then_else:VNx8DI (unspec:VNx8BI [
+			(const_vector:VNx8BI repeat [
+				(const_int 1 [0x1])
+			    ])
+			(reg/v:DI 13 a3 [orig:139 vl ] [139])
+			(const_int 2 [0x2]) repeated x2
+			(const_int 0 [0])
+			(reg:SI 66 vl)
+			(reg:SI 67 vtype)
+		    ] UNSPEC_VPREDICATE)
+		(plus:VNx8DI (reg/v:VNx8DI 104 v8 [orig:137 op1 ] [137])
+		    (const_vector:VNx8DI repeat [
+			    (const_int 2730 [0xaaa])
+			]))
+		(unspec:VNx8DI [
+			(const_int 0 [0])
+		    ] UNSPEC_VUNDEF))
+	    (nil))))
+    Here we want to remove use "a3". However, the REG_EQUAL/REG_EQUIV note use
+    "a3" which made us fail in change_insn.  We reference to the
+    'aarch64-cc-fusion.cc' and add this method.  */
+  remove_reg_equal_equiv_notes (rinsn);
   confirm_change_group ();
   ssa->change_insn (change);
 
@@ -941,51 +1062,578 @@ change_vsetvl_insn (const insn_info *insn, const vector_insn_info &info)
 }
 
 static bool
-source_equal_p (rtx_insn *rinsn1, rtx_insn *rinsn2)
+avl_source_has_vsetvl_p (set_info *avl_source)
 {
+  if (!avl_source)
+    return false;
+  if (!avl_source->insn ())
+    return false;
+  if (avl_source->insn ()->is_real ())
+    return vsetvl_insn_p (avl_source->insn ()->rtl ());
+  hash_set<set_info *> sets = get_all_sets (avl_source, true, false, true);
+  for (const auto set : sets)
+    {
+      if (set->insn ()->is_real () && vsetvl_insn_p (set->insn ()->rtl ()))
+	return true;
+    }
+  return false;
+}
+
+static bool
+source_equal_p (insn_info *insn1, insn_info *insn2)
+{
+  if (!insn1 || !insn2)
+    return false;
+  rtx_insn *rinsn1 = insn1->rtl ();
+  rtx_insn *rinsn2 = insn2->rtl ();
   if (!rinsn1 || !rinsn2)
     return false;
   rtx note1 = find_reg_equal_equiv_note (rinsn1);
   rtx note2 = find_reg_equal_equiv_note (rinsn2);
   rtx single_set1 = single_set (rinsn1);
   rtx single_set2 = single_set (rinsn2);
+  if (read_vl_insn_p (rinsn1) && read_vl_insn_p (rinsn2))
+    {
+      const insn_info *load1 = get_backward_fault_first_load_insn (insn1);
+      const insn_info *load2 = get_backward_fault_first_load_insn (insn2);
+      return load1 && load2 && load1 == load2;
+    }
 
   if (note1 && note2 && rtx_equal_p (note1, note2))
     return true;
-  if (single_set1 && single_set2
-      && rtx_equal_p (SET_SRC (single_set1), SET_SRC (single_set2)))
-    return true;
-  return false;
+
+  /* Since vsetvl instruction is not single SET.
+     We handle this case specially here.  */
+  if (vsetvl_insn_p (insn1->rtl ()) && vsetvl_insn_p (insn2->rtl ()))
+    {
+      /* For example:
+	   vsetvl1 a6,a5,e32m1
+	   RVV 1 (use a6 as AVL)
+	   vsetvl2 a5,a5,e8mf4
+	   RVV 2 (use a5 as AVL)
+	 We consider AVL of RVV 1 and RVV 2 are same so that we can
+	 gain more optimization opportunities.
+
+	 Note: insn1_info.compatible_avl_p (insn2_info)
+	 will make sure there is no instruction between vsetvl1 and vsetvl2
+	 modify a5 since their def will be different if there is instruction
+	 modify a5 and compatible_avl_p will return false.  */
+      vector_insn_info insn1_info, insn2_info;
+      insn1_info.parse_insn (insn1);
+      insn2_info.parse_insn (insn2);
+
+      /* To avoid dead loop, we don't optimize a vsetvli def has vsetvli
+	 instructions which will complicate the situation.  */
+      if (avl_source_has_vsetvl_p (insn1_info.get_avl_source ())
+	  || avl_source_has_vsetvl_p (insn2_info.get_avl_source ()))
+	return false;
+
+      if (insn1_info.same_vlmax_p (insn2_info)
+	  && insn1_info.compatible_avl_p (insn2_info))
+	return true;
+    }
+
+  /* We only handle AVL is set by instructions with no side effects.  */
+  if (!single_set1 || !single_set2)
+    return false;
+  if (!rtx_equal_p (SET_SRC (single_set1), SET_SRC (single_set2)))
+    return false;
+  gcc_assert (insn1->uses ().size () == insn2->uses ().size ());
+  for (size_t i = 0; i < insn1->uses ().size (); i++)
+    if (insn1->uses ()[i] != insn2->uses ()[i])
+      return false;
+  return true;
 }
 
 /* Helper function to get single same real RTL source.
    return NULL if it is not a single real RTL source.  */
-static rtx_insn *
+static insn_info *
 extract_single_source (set_info *set)
 {
   if (!set)
     return nullptr;
   if (set->insn ()->is_real ())
-    return set->insn ()->rtl ();
+    return set->insn ();
   if (!set->insn ()->is_phi ())
     return nullptr;
-  phi_info *phi = safe_dyn_cast<phi_info *> (set);
-  hash_set<insn_info *> insns = get_all_nonphi_defs (phi);
+  hash_set<set_info *> sets = get_all_sets (set, true, false, true);
 
-  insn_info *first_insn = (*insns.begin ());
+  insn_info *first_insn = (*sets.begin ())->insn ();
   if (first_insn->is_artificial ())
     return nullptr;
-  for (const insn_info *insn : insns)
+  for (const set_info *set : sets)
     {
       /* If there is a head or end insn, we conservative return
 	 NULL so that VSETVL PASS will insert vsetvl directly.  */
-      if (insn->is_artificial ())
+      if (set->insn ()->is_artificial ())
 	return nullptr;
-      if (!source_equal_p (insn->rtl (), first_insn->rtl ()))
+      if (!source_equal_p (set->insn (), first_insn))
 	return nullptr;
     }
 
-  return (*insns.begin ())->rtl ();
+  return first_insn;
+}
+
+static unsigned
+calculate_sew (vlmul_type vlmul, unsigned int ratio)
+{
+  for (const unsigned sew : ALL_SEW)
+    if (calculate_ratio (sew, vlmul) == ratio)
+      return sew;
+  return 0;
+}
+
+static vlmul_type
+calculate_vlmul (unsigned int sew, unsigned int ratio)
+{
+  for (const vlmul_type vlmul : ALL_LMUL)
+    if (calculate_ratio (sew, vlmul) == ratio)
+      return vlmul;
+  return LMUL_RESERVED;
+}
+
+static bool
+incompatible_avl_p (const vector_insn_info &info1,
+		    const vector_insn_info &info2)
+{
+  return !info1.compatible_avl_p (info2) && !info2.compatible_avl_p (info1);
+}
+
+static bool
+different_sew_p (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  return info1.get_sew () != info2.get_sew ();
+}
+
+static bool
+different_lmul_p (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  return info1.get_vlmul () != info2.get_vlmul ();
+}
+
+static bool
+different_ratio_p (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  return info1.get_ratio () != info2.get_ratio ();
+}
+
+static bool
+different_tail_policy_p (const vector_insn_info &info1,
+			 const vector_insn_info &info2)
+{
+  return info1.get_ta () != info2.get_ta ();
+}
+
+static bool
+different_mask_policy_p (const vector_insn_info &info1,
+			 const vector_insn_info &info2)
+{
+  return info1.get_ma () != info2.get_ma ();
+}
+
+static bool
+possible_zero_avl_p (const vector_insn_info &info1,
+		     const vector_insn_info &info2)
+{
+  return !info1.has_non_zero_avl () || !info2.has_non_zero_avl ();
+}
+
+static bool
+second_ratio_invalid_for_first_sew_p (const vector_insn_info &info1,
+				      const vector_insn_info &info2)
+{
+  return calculate_vlmul (info1.get_sew (), info2.get_ratio ())
+	 == LMUL_RESERVED;
+}
+
+static bool
+second_ratio_invalid_for_first_lmul_p (const vector_insn_info &info1,
+				       const vector_insn_info &info2)
+{
+  return calculate_sew (info1.get_vlmul (), info2.get_ratio ()) == 0;
+}
+
+static bool
+second_sew_less_than_first_sew_p (const vector_insn_info &info1,
+				  const vector_insn_info &info2)
+{
+  return info2.get_sew () < info1.get_sew ();
+}
+
+static bool
+first_sew_less_than_second_sew_p (const vector_insn_info &info1,
+				  const vector_insn_info &info2)
+{
+  return info1.get_sew () < info2.get_sew ();
+}
+
+/* return 0 if LMUL1 == LMUL2.
+   return -1 if LMUL1 < LMUL2.
+   return 1 if LMUL1 > LMUL2.  */
+static int
+compare_lmul (vlmul_type vlmul1, vlmul_type vlmul2)
+{
+  if (vlmul1 == vlmul2)
+    return 0;
+
+  switch (vlmul1)
+    {
+    case LMUL_1:
+      if (vlmul2 == LMUL_2 || vlmul2 == LMUL_4 || vlmul2 == LMUL_8)
+	return 1;
+      else
+	return -1;
+    case LMUL_2:
+      if (vlmul2 == LMUL_4 || vlmul2 == LMUL_8)
+	return 1;
+      else
+	return -1;
+    case LMUL_4:
+      if (vlmul2 == LMUL_8)
+	return 1;
+      else
+	return -1;
+    case LMUL_8:
+      return -1;
+    case LMUL_F2:
+      if (vlmul2 == LMUL_1 || vlmul2 == LMUL_2 || vlmul2 == LMUL_4
+	  || vlmul2 == LMUL_8)
+	return 1;
+      else
+	return -1;
+    case LMUL_F4:
+      if (vlmul2 == LMUL_F2 || vlmul2 == LMUL_1 || vlmul2 == LMUL_2
+	  || vlmul2 == LMUL_4 || vlmul2 == LMUL_8)
+	return 1;
+      else
+	return -1;
+    case LMUL_F8:
+      return 0;
+    default:
+      gcc_unreachable ();
+    }
+}
+
+static bool
+second_lmul_less_than_first_lmul_p (const vector_insn_info &info1,
+				    const vector_insn_info &info2)
+{
+  return compare_lmul (info2.get_vlmul (), info1.get_vlmul ()) == -1;
+}
+
+static bool
+second_ratio_less_than_first_ratio_p (const vector_insn_info &info1,
+				      const vector_insn_info &info2)
+{
+  return info2.get_ratio () < info1.get_ratio ();
+}
+
+static CONSTEXPR const demands_cond incompatible_conds[] = {
+#define DEF_INCOMPATIBLE_COND(AVL1, SEW1, LMUL1, RATIO1, NONZERO_AVL1,         \
+			      GE_SEW1, TAIL_POLICTY1, MASK_POLICY1, AVL2,      \
+			      SEW2, LMUL2, RATIO2, NONZERO_AVL2, GE_SEW2,      \
+			      TAIL_POLICTY2, MASK_POLICY2, COND)               \
+  {{{AVL1, SEW1, LMUL1, RATIO1, NONZERO_AVL1, GE_SEW1, TAIL_POLICTY1,          \
+     MASK_POLICY1},                                                            \
+    {AVL2, SEW2, LMUL2, RATIO2, NONZERO_AVL2, GE_SEW2, TAIL_POLICTY2,          \
+     MASK_POLICY2}},                                                           \
+   COND},
+#include "riscv-vsetvl.def"
+};
+
+static unsigned
+greatest_sew (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  return std::max (info1.get_sew (), info2.get_sew ());
+}
+
+static unsigned
+first_sew (const vector_insn_info &info1, const vector_insn_info &)
+{
+  return info1.get_sew ();
+}
+
+static unsigned
+second_sew (const vector_insn_info &, const vector_insn_info &info2)
+{
+  return info2.get_sew ();
+}
+
+static vlmul_type
+first_vlmul (const vector_insn_info &info1, const vector_insn_info &)
+{
+  return info1.get_vlmul ();
+}
+
+static vlmul_type
+second_vlmul (const vector_insn_info &, const vector_insn_info &info2)
+{
+  return info2.get_vlmul ();
+}
+
+static unsigned
+first_ratio (const vector_insn_info &info1, const vector_insn_info &)
+{
+  return info1.get_ratio ();
+}
+
+static unsigned
+second_ratio (const vector_insn_info &, const vector_insn_info &info2)
+{
+  return info2.get_ratio ();
+}
+
+static vlmul_type
+vlmul_for_first_sew_second_ratio (const vector_insn_info &info1,
+				  const vector_insn_info &info2)
+{
+  return calculate_vlmul (info1.get_sew (), info2.get_ratio ());
+}
+
+static unsigned
+ratio_for_second_sew_first_vlmul (const vector_insn_info &info1,
+				  const vector_insn_info &info2)
+{
+  return calculate_ratio (info2.get_sew (), info1.get_vlmul ());
+}
+
+static CONSTEXPR const demands_fuse_rule fuse_rules[] = {
+#define DEF_SEW_LMUL_FUSE_RULE(DEMAND_SEW1, DEMAND_LMUL1, DEMAND_RATIO1,       \
+			       DEMAND_GE_SEW1, DEMAND_SEW2, DEMAND_LMUL2,      \
+			       DEMAND_RATIO2, DEMAND_GE_SEW2, NEW_DEMAND_SEW,  \
+			       NEW_DEMAND_LMUL, NEW_DEMAND_RATIO,              \
+			       NEW_DEMAND_GE_SEW, NEW_SEW, NEW_VLMUL,          \
+			       NEW_RATIO)                                      \
+  {{{DEMAND_ANY, DEMAND_SEW1, DEMAND_LMUL1, DEMAND_RATIO1, DEMAND_ANY,         \
+     DEMAND_GE_SEW1, DEMAND_ANY, DEMAND_ANY},                                  \
+    {DEMAND_ANY, DEMAND_SEW2, DEMAND_LMUL2, DEMAND_RATIO2, DEMAND_ANY,         \
+     DEMAND_GE_SEW2, DEMAND_ANY, DEMAND_ANY}},                                 \
+   NEW_DEMAND_SEW,                                                             \
+   NEW_DEMAND_LMUL,                                                            \
+   NEW_DEMAND_RATIO,                                                           \
+   NEW_DEMAND_GE_SEW,                                                          \
+   NEW_SEW,                                                                    \
+   NEW_VLMUL,                                                                  \
+   NEW_RATIO},
+#include "riscv-vsetvl.def"
+};
+
+static bool
+always_unavailable (const vector_insn_info &, const vector_insn_info &)
+{
+  return true;
+}
+
+static bool
+avl_unavailable_p (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  return !info2.compatible_avl_p (info1.get_avl_info ());
+}
+
+static bool
+sew_unavailable_p (const vector_insn_info &info1, const vector_insn_info &info2)
+{
+  if (!info2.demand_p (DEMAND_LMUL) && !info2.demand_p (DEMAND_RATIO))
+    {
+      if (info2.demand_p (DEMAND_GE_SEW))
+	return info1.get_sew () < info2.get_sew ();
+      return info1.get_sew () != info2.get_sew ();
+    }
+  return true;
+}
+
+static bool
+lmul_unavailable_p (const vector_insn_info &info1,
+		    const vector_insn_info &info2)
+{
+  if (info1.get_vlmul () == info2.get_vlmul () && !info2.demand_p (DEMAND_SEW)
+      && !info2.demand_p (DEMAND_RATIO))
+    return false;
+  return true;
+}
+
+static bool
+ge_sew_unavailable_p (const vector_insn_info &info1,
+		      const vector_insn_info &info2)
+{
+  if (!info2.demand_p (DEMAND_LMUL) && !info2.demand_p (DEMAND_RATIO)
+      && info2.demand_p (DEMAND_GE_SEW))
+    return info1.get_sew () < info2.get_sew ();
+  return true;
+}
+
+static bool
+ge_sew_lmul_unavailable_p (const vector_insn_info &info1,
+			   const vector_insn_info &info2)
+{
+  if (!info2.demand_p (DEMAND_RATIO) && info2.demand_p (DEMAND_GE_SEW))
+    return info1.get_sew () < info2.get_sew ();
+  return true;
+}
+
+static bool
+ge_sew_ratio_unavailable_p (const vector_insn_info &info1,
+			    const vector_insn_info &info2)
+{
+  if (!info2.demand_p (DEMAND_LMUL) && info2.demand_p (DEMAND_GE_SEW))
+    return info1.get_sew () < info2.get_sew ();
+  return true;
+}
+
+static CONSTEXPR const demands_cond unavailable_conds[] = {
+#define DEF_UNAVAILABLE_COND(AVL1, SEW1, LMUL1, RATIO1, NONZERO_AVL1, GE_SEW1, \
+			     TAIL_POLICTY1, MASK_POLICY1, AVL2, SEW2, LMUL2,   \
+			     RATIO2, NONZERO_AVL2, GE_SEW2, TAIL_POLICTY2,     \
+			     MASK_POLICY2, COND)                               \
+  {{{AVL1, SEW1, LMUL1, RATIO1, NONZERO_AVL1, GE_SEW1, TAIL_POLICTY1,          \
+     MASK_POLICY1},                                                            \
+    {AVL2, SEW2, LMUL2, RATIO2, NONZERO_AVL2, GE_SEW2, TAIL_POLICTY2,          \
+     MASK_POLICY2}},                                                           \
+   COND},
+#include "riscv-vsetvl.def"
+};
+
+static bool
+same_sew_lmul_demand_p (const bool *dems1, const bool *dems2)
+{
+  return dems1[DEMAND_SEW] == dems2[DEMAND_SEW]
+	 && dems1[DEMAND_LMUL] == dems2[DEMAND_LMUL]
+	 && dems1[DEMAND_RATIO] == dems2[DEMAND_RATIO] && !dems1[DEMAND_GE_SEW]
+	 && !dems2[DEMAND_GE_SEW];
+}
+
+static bool
+propagate_avl_across_demands_p (const vector_insn_info &info1,
+				const vector_insn_info &info2)
+{
+  if (info2.demand_p (DEMAND_AVL))
+    {
+      if (info2.demand_p (DEMAND_NONZERO_AVL))
+	return info1.demand_p (DEMAND_AVL)
+	       && !info1.demand_p (DEMAND_NONZERO_AVL) && info1.has_avl_reg ();
+    }
+  else
+    return info1.demand_p (DEMAND_AVL) && info1.has_avl_reg ();
+  return false;
+}
+
+static bool
+reg_available_p (const insn_info *insn, const vector_insn_info &info)
+{
+  if (info.has_avl_reg () && !info.get_avl_source ())
+    return false;
+  insn_info *def_insn = info.get_avl_source ()->insn ();
+  if (def_insn->bb () == insn->bb ())
+    return before_p (def_insn, insn);
+  else
+    return dominated_by_p (CDI_DOMINATORS, insn->bb ()->cfg_bb (),
+			   def_insn->bb ()->cfg_bb ());
+}
+
+/* Return true if the instruction support relaxed compatible check.  */
+static bool
+support_relaxed_compatible_p (const vector_insn_info &info1,
+			      const vector_insn_info &info2)
+{
+  if (fault_first_load_p (info1.get_insn ()->rtl ())
+      && info2.demand_p (DEMAND_AVL) && info2.has_avl_reg ()
+      && info2.get_avl_source () && info2.get_avl_source ()->insn ()->is_phi ())
+    {
+      hash_set<set_info *> sets
+	= get_all_sets (info2.get_avl_source (), true, false, false);
+      for (set_info *set : sets)
+	{
+	  if (read_vl_insn_p (set->insn ()->rtl ()))
+	    {
+	      const insn_info *insn
+		= get_backward_fault_first_load_insn (set->insn ());
+	      if (insn == info1.get_insn ())
+		return info2.compatible_vtype_p (info1);
+	    }
+	}
+    }
+  return false;
+}
+
+/* Return true if the block is worthwhile backward propagation.  */
+static bool
+backward_propagate_worthwhile_p (const basic_block cfg_bb,
+				 const vector_block_info block_info)
+{
+  if (loop_basic_block_p (cfg_bb))
+    {
+      if (block_info.reaching_out.valid_or_dirty_p ())
+	{
+	  if (block_info.local_dem.compatible_p (block_info.reaching_out))
+	    {
+	      /* Case 1 (Can backward propagate):
+		 ....
+		 bb0:
+		 ...
+		 for (int i = 0; i < n; i++)
+		   {
+		     vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
+		     __riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
+		   }
+		 The local_dem is compatible with reaching_out. Such case is
+		 worthwhile backward propagation.  */
+	      return true;
+	    }
+	  else
+	    {
+	      if (support_relaxed_compatible_p (block_info.reaching_out,
+						block_info.local_dem))
+		return true;
+	      /* Case 2 (Don't backward propagate):
+		    ....
+		    bb0:
+		    ...
+		    for (int i = 0; i < n; i++)
+		      {
+			vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
+			__riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
+			vint16mf2_t v2 = __riscv_vle16_v_i16mf2 (in + i + 6, 8);
+			__riscv_vse16_v_i16mf2 (out + i + 6, v, 8);
+		      }
+		 The local_dem is incompatible with reaching_out.
+		 It makes no sense to backward propagate the local_dem since we
+		 can't avoid VSETVL inside the loop.  */
+	      return false;
+	    }
+	}
+      else
+	{
+	  gcc_assert (block_info.reaching_out.unknown_p ());
+	  /* Case 3 (Don't backward propagate):
+		....
+		bb0:
+		...
+		for (int i = 0; i < n; i++)
+		  {
+		    vint16mf4_t v = __riscv_vle16_v_i16mf4 (in + i + 5, 7);
+		    __riscv_vse16_v_i16mf4 (out + i + 5, v, 7);
+		    fn3 ();
+		  }
+	    The local_dem is VALID, but the reaching_out is UNKNOWN.
+	    It makes no sense to backward propagate the local_dem since we
+	    can't avoid VSETVL inside the loop.  */
+	  return false;
+	}
+    }
+
+  return true;
+}
+
+/* Count the number of REGNO in RINSN.  */
+static int
+count_regno_occurrences (rtx_insn *rinsn, unsigned int regno)
+{
+  int count = 0;
+  extract_insn (rinsn);
+  for (int i = 0; i < recog_data.n_operands; i++)
+    if (refers_to_regno_p (regno, recog_data.operand[i]))
+      count++;
+  return count;
 }
 
 avl_info::avl_info (const avl_info &other)
@@ -1003,9 +1651,39 @@ avl_info::single_source_equal_p (const avl_info &other) const
 {
   set_info *set1 = m_source;
   set_info *set2 = other.get_source ();
-  rtx_insn *rinsn1 = extract_single_source (set1);
-  rtx_insn *rinsn2 = extract_single_source (set2);
-  return source_equal_p (rinsn1, rinsn2);
+  insn_info *insn1 = extract_single_source (set1);
+  insn_info *insn2 = extract_single_source (set2);
+  if (!insn1 || !insn2)
+    return false;
+  return source_equal_p (insn1, insn2);
+}
+
+bool
+avl_info::multiple_source_equal_p (const avl_info &other) const
+{
+  /* When the def info is same in RTL_SSA namespace, it's safe
+     to consider they are avl compatible.  */
+  if (m_source == other.get_source ())
+    return true;
+
+  /* We only consider handle PHI node.  */
+  if (!m_source->insn ()->is_phi () || !other.get_source ()->insn ()->is_phi ())
+    return false;
+
+  phi_info *phi1 = as_a<phi_info *> (m_source);
+  phi_info *phi2 = as_a<phi_info *> (other.get_source ());
+
+  if (phi1->is_degenerate () && phi2->is_degenerate ())
+    {
+      /* Degenerate PHI means the PHI node only have one input.  */
+
+      /* If both PHI nodes have the same single input in use list.
+	 We consider they are AVL compatible.  */
+      if (phi1->input_value (0) == phi2->input_value (0))
+	return true;
+    }
+  /* TODO: We can support more optimization cases in the future.  */
+  return false;
 }
 
 avl_info &
@@ -1024,11 +1702,6 @@ avl_info::operator== (const avl_info &other) const
   if (!other.get_value ())
     return false;
 
-  /* It's safe to consider they are equal if their RTX value are
-     strictly the same.  */
-  if (m_value == other.get_value ())
-    return true;
-
   if (GET_CODE (m_value) != GET_CODE (other.get_value ()))
     return false;
 
@@ -1040,10 +1713,6 @@ avl_info::operator== (const avl_info &other) const
   if (vlmax_avl_p (m_value))
     return vlmax_avl_p (other.get_value ());
 
-  /* If Pseudo REGNO are same, it's safe to consider they are same.  */
-  if (ORIGINAL_REGNO (m_value) == ORIGINAL_REGNO (other.get_value ()))
-    return true;
-
   /* If any source is undef value, we think they are not equal.  */
   if (!m_source || !other.get_source ())
     return false;
@@ -1053,15 +1722,23 @@ avl_info::operator== (const avl_info &other) const
   if (single_source_equal_p (other))
     return true;
 
-  /* TODO: Support avl defined by PHI which includes multiple different insn
-   * later.  */
-  return false;
+  return multiple_source_equal_p (other);
 }
 
 bool
 avl_info::operator!= (const avl_info &other) const
 {
   return !(*this == other);
+}
+
+bool
+avl_info::has_non_zero_avl () const
+{
+  if (has_avl_imm ())
+    return INTVAL (get_value ()) > 0;
+  if (has_avl_reg ())
+    return vlmax_avl_p (get_value ());
+  return false;
 }
 
 /* Initialize VL/VTYPE information.  */
@@ -1077,7 +1754,7 @@ vl_vtype_info::vl_vtype_info (avl_info avl_in, uint8_t sew_in,
 bool
 vl_vtype_info::operator== (const vl_vtype_info &other) const
 {
-  return m_avl == other.get_avl_info () && m_sew == other.get_sew ()
+  return same_avl_p (other) && m_sew == other.get_sew ()
 	 && m_vlmul == other.get_vlmul () && m_ta == other.get_ta ()
 	 && m_ma == other.get_ma () && m_ratio == other.get_ratio ();
 }
@@ -1089,19 +1766,14 @@ vl_vtype_info::operator!= (const vl_vtype_info &other) const
 }
 
 bool
-vl_vtype_info::has_non_zero_avl () const
-{
-  if (has_avl_imm ())
-    return INTVAL (get_avl ()) > 0;
-  if (has_avl_reg ())
-    return vlmax_avl_p (get_avl ());
-  return false;
-}
-
-bool
 vl_vtype_info::same_avl_p (const vl_vtype_info &other) const
 {
-  return get_avl () == other.get_avl ();
+  /* We need to compare both RTL and SET. If both AVL are CONST_INT.
+     For example, const_int 3 and const_int 4, we need to compare
+     RTL. If both AVL are REG and their REGNO are same, we need to
+     compare SET.  */
+  return get_avl () == other.get_avl ()
+	 && get_avl_source () == other.get_avl_source ();
 }
 
 bool
@@ -1123,48 +1795,32 @@ vl_vtype_info::same_vlmax_p (const vl_vtype_info &other) const
    or Dem2 is stricter than Dem1.
    For example, Dem1 (demand SEW + LMUL) > Dem2 (demand RATIO).  */
 bool
-vector_insn_info::operator> (const vector_insn_info &other) const
-{
-  if (other.compatible_p (static_cast<const vl_vtype_info &> (*this))
-      && !this->compatible_p (static_cast<const vl_vtype_info &> (other)))
-    return true;
-  return false;
-}
-
-bool
 vector_insn_info::operator>= (const vector_insn_info &other) const
 {
-  if (*this > other)
+  if (support_relaxed_compatible_p (*this, other))
+    {
+      unsigned array_size = sizeof (unavailable_conds) / sizeof (demands_cond);
+      /* Bypass AVL unavailable cases.  */
+      for (unsigned i = 2; i < array_size; i++)
+	if (unavailable_conds[i].pair.match_cond_p (this->get_demands (),
+						    other.get_demands ())
+	    && unavailable_conds[i].incompatible_p (*this, other))
+	  return false;
+      return true;
+    }
+
+  if (!other.compatible_p (static_cast<const vl_vtype_info &> (*this)))
+    return false;
+  if (!this->compatible_p (static_cast<const vl_vtype_info &> (other)))
     return true;
 
   if (*this == other)
     return true;
 
-  if (!compatible_p (other))
-    return false;
-
-  if (!demand_p (DEMAND_AVL) && other.demand_p (DEMAND_AVL))
-    return false;
-
-  if (same_vlmax_p (other))
-    {
-      if (demand_p (DEMAND_RATIO) && !other.demand_p (DEMAND_RATIO)
-	  && (get_sew () != other.get_sew ()
-	      || get_vlmul () != other.get_vlmul ()))
-	return false;
-
-      if (get_sew () == other.get_sew () && get_vlmul () == other.get_vlmul ())
-	{
-	  if (demand_p (DEMAND_RATIO) && !other.demand_p (DEMAND_RATIO))
-	    return false;
-	}
-    }
-
-  if (!demand_p (DEMAND_TAIL_POLICY) && other.demand_p (DEMAND_TAIL_POLICY))
-    return false;
-
-  if (!demand_p (DEMAND_MASK_POLICY) && other.demand_p (DEMAND_MASK_POLICY))
-    return false;
+  for (const auto &cond : unavailable_conds)
+    if (cond.pair.match_cond_p (this->get_demands (), other.get_demands ())
+	&& cond.incompatible_p (*this, other))
+      return false;
 
   return true;
 }
@@ -1239,7 +1895,7 @@ vector_insn_info::parse_insn (insn_info *insn)
 
   /* If this is something that updates VL/VTYPE that we don't know about, set
      the state to unknown.  */
-  if (!vector_config_insn_p (insn->rtl ())
+  if (!vector_config_insn_p (insn->rtl ()) && !has_vtype_op (insn->rtl ())
       && (find_access (insn->defs (), VL_REGNUM)
 	  || find_access (insn->defs (), VTYPE_REGNUM)))
     {
@@ -1275,24 +1931,46 @@ vector_insn_info::parse_insn (insn_info *insn)
 	 demand SEW && LMUL both. Some instructions may demand SEW
 	 only and ignore LMUL, will fix it later.  */
       m_demands[DEMAND_SEW] = true;
-      m_demands[DEMAND_LMUL] = true;
+      if (!ignore_vlmul_insn_p (insn->rtl ()))
+	m_demands[DEMAND_LMUL] = true;
     }
 
   if (get_attr_ta (insn->rtl ()) != INVALID_ATTRIBUTE)
     m_demands[DEMAND_TAIL_POLICY] = true;
   if (get_attr_ma (insn->rtl ()) != INVALID_ATTRIBUTE)
     m_demands[DEMAND_MASK_POLICY] = true;
-}
 
-void
-vector_insn_info::demand_vl_vtype ()
-{
-  m_state = VALID;
-  m_demands[DEMAND_AVL] = true;
-  m_demands[DEMAND_SEW] = true;
-  m_demands[DEMAND_LMUL] = true;
-  m_demands[DEMAND_TAIL_POLICY] = true;
-  m_demands[DEMAND_MASK_POLICY] = true;
+  if (vector_config_insn_p (insn->rtl ()))
+    return;
+
+  if (scalar_move_insn_p (insn->rtl ()))
+    {
+      if (m_avl.has_non_zero_avl ())
+	m_demands[DEMAND_NONZERO_AVL] = true;
+      if (m_ta)
+	m_demands[DEMAND_GE_SEW] = true;
+    }
+
+  if (!m_avl.has_avl_reg () || vlmax_avl_p (get_avl ()) || !m_avl.get_source ())
+    return;
+  if (!m_avl.get_source ()->insn ()->is_real ()
+      && !m_avl.get_source ()->insn ()->is_phi ())
+    return;
+
+  insn_info *def_insn = extract_single_source (m_avl.get_source ());
+  if (!def_insn || !vsetvl_insn_p (def_insn->rtl ()))
+    return;
+
+  vector_insn_info new_info;
+  new_info.parse_insn (def_insn);
+  if (!same_vlmax_p (new_info) && !scalar_move_insn_p (insn->rtl ()))
+    return;
+  /* TODO: Currently, we don't forward AVL for non-VLMAX vsetvl.  */
+  if (vlmax_avl_p (new_info.get_avl ()))
+    set_avl_info (avl_info (new_info.get_avl (), get_avl_source ()));
+
+  if (scalar_move_insn_p (insn->rtl ()) && m_avl.has_non_zero_avl ())
+    m_demands[DEMAND_NONZERO_AVL] = true;
 }
 
 bool
@@ -1301,37 +1979,22 @@ vector_insn_info::compatible_p (const vector_insn_info &other) const
   gcc_assert (valid_or_dirty_p () && other.valid_or_dirty_p ()
 	      && "Can't compare invalid demanded infos");
 
-  /* Check SEW.  */
-  if (demand_p (DEMAND_SEW) && other.demand_p (DEMAND_SEW)
-      && get_sew () != other.get_sew ())
-    return false;
+  for (const auto &cond : incompatible_conds)
+    if (cond.dual_incompatible_p (*this, other))
+      return false;
+  return true;
+}
 
-  /* Check LMUL.  */
-  if (demand_p (DEMAND_LMUL) && other.demand_p (DEMAND_LMUL)
-      && get_vlmul () != other.get_vlmul ())
-    return false;
-
-  /* Check RATIO.  */
-  if (demand_p (DEMAND_RATIO) && other.demand_p (DEMAND_RATIO)
-      && get_ratio () != other.get_ratio ())
-    return false;
-  if (demand_p (DEMAND_RATIO) && (other.get_sew () || other.get_vlmul ())
-      && get_ratio () != other.get_ratio ())
-    return false;
-  if (other.demand_p (DEMAND_RATIO) && (get_sew () || get_vlmul ())
-      && get_ratio () != other.get_ratio ())
-    return false;
-
-  if (demand_p (DEMAND_TAIL_POLICY) && other.demand_p (DEMAND_TAIL_POLICY)
-      && get_ta () != other.get_ta ())
-    return false;
-  if (demand_p (DEMAND_MASK_POLICY) && other.demand_p (DEMAND_MASK_POLICY)
-      && get_ma () != other.get_ma ())
-    return false;
-
-  if (demand_p (DEMAND_AVL) && other.demand_p (DEMAND_AVL))
-    return compatible_avl_p (other);
-
+bool
+vector_insn_info::skip_avl_compatible_p (const vector_insn_info &other) const
+{
+  gcc_assert (valid_or_dirty_p () && other.valid_or_dirty_p ()
+	      && "Can't compare invalid demanded infos");
+  unsigned array_size = sizeof (incompatible_conds) / sizeof (demands_cond);
+  /* Bypass AVL incompatible cases.  */
+  for (unsigned i = 1; i < array_size; i++)
+    if (incompatible_conds[i].dual_incompatible_p (*this, other))
+      return false;
   return true;
 }
 
@@ -1342,6 +2005,8 @@ vector_insn_info::compatible_avl_p (const vl_vtype_info &other) const
   gcc_assert (!unknown_p () && "Can't compare AVL in unknown state");
   if (!demand_p (DEMAND_AVL))
     return true;
+  if (demand_p (DEMAND_NONZERO_AVL) && other.has_non_zero_avl ())
+    return true;
   return get_avl_info () == other.get_avl_info ();
 }
 
@@ -1351,6 +2016,10 @@ vector_insn_info::compatible_avl_p (const avl_info &other) const
   gcc_assert (valid_or_dirty_p () && "Can't compare invalid vl_vtype_info");
   gcc_assert (!unknown_p () && "Can't compare AVL in unknown state");
   gcc_assert (demand_p (DEMAND_AVL) && "Can't compare AVL undemand state");
+  if (!demand_p (DEMAND_AVL))
+    return true;
+  if (demand_p (DEMAND_NONZERO_AVL) && other.has_non_zero_avl ())
+    return true;
   return get_avl_info () == other;
 }
 
@@ -1359,8 +2028,13 @@ vector_insn_info::compatible_vtype_p (const vl_vtype_info &other) const
 {
   gcc_assert (valid_or_dirty_p () && "Can't compare invalid vl_vtype_info");
   gcc_assert (!unknown_p () && "Can't compare VTYPE in unknown state");
-  if (demand_p (DEMAND_SEW) && m_sew != other.get_sew ())
-    return false;
+  if (demand_p (DEMAND_SEW))
+    {
+      if (!demand_p (DEMAND_GE_SEW) && m_sew != other.get_sew ())
+	return false;
+      if (demand_p (DEMAND_GE_SEW) && m_sew > other.get_sew ())
+	return false;
+    }
   if (demand_p (DEMAND_LMUL) && m_vlmul != other.get_vlmul ())
     return false;
   if (demand_p (DEMAND_RATIO) && m_ratio != other.get_ratio ())
@@ -1395,109 +2069,209 @@ vector_insn_info::compatible_p (const vl_vtype_info &curr_info) const
   return compatible_avl_p (curr_info) && compatible_vtype_p (curr_info);
 }
 
+bool
+vector_insn_info::available_p (const vector_insn_info &other) const
+{
+  return *this >= other;
+}
+
+void
+vector_insn_info::fuse_avl (const vector_insn_info &info1,
+			    const vector_insn_info &info2)
+{
+  set_insn (info1.get_insn ());
+  if (info1.demand_p (DEMAND_AVL))
+    {
+      if (info1.demand_p (DEMAND_NONZERO_AVL))
+	{
+	  if (info2.demand_p (DEMAND_AVL)
+	      && !info2.demand_p (DEMAND_NONZERO_AVL))
+	    {
+	      set_avl_info (info2.get_avl_info ());
+	      set_demand (DEMAND_AVL, true);
+	      set_demand (DEMAND_NONZERO_AVL, false);
+	      return;
+	    }
+	}
+      set_avl_info (info1.get_avl_info ());
+      set_demand (DEMAND_NONZERO_AVL, info1.demand_p (DEMAND_NONZERO_AVL));
+    }
+  else
+    {
+      set_avl_info (info2.get_avl_info ());
+      set_demand (DEMAND_NONZERO_AVL, info2.demand_p (DEMAND_NONZERO_AVL));
+    }
+  set_demand (DEMAND_AVL,
+	      info1.demand_p (DEMAND_AVL) || info2.demand_p (DEMAND_AVL));
+}
+
+void
+vector_insn_info::fuse_sew_lmul (const vector_insn_info &info1,
+				 const vector_insn_info &info2)
+{
+  /* We need to fuse sew && lmul according to demand info:
+
+     1. GE_SEW.
+     2. SEW.
+     3. LMUL.
+     4. RATIO.  */
+  if (same_sew_lmul_demand_p (info1.get_demands (), info2.get_demands ()))
+    {
+      set_demand (DEMAND_SEW, info2.demand_p (DEMAND_SEW));
+      set_demand (DEMAND_LMUL, info2.demand_p (DEMAND_LMUL));
+      set_demand (DEMAND_RATIO, info2.demand_p (DEMAND_RATIO));
+      set_demand (DEMAND_GE_SEW, info2.demand_p (DEMAND_GE_SEW));
+      set_sew (info2.get_sew ());
+      set_vlmul (info2.get_vlmul ());
+      set_ratio (info2.get_ratio ());
+      return;
+    }
+  for (const auto &rule : fuse_rules)
+    {
+      if (rule.pair.match_cond_p (info1.get_demands (), info2.get_demands ()))
+	{
+	  set_demand (DEMAND_SEW, rule.demand_sew_p);
+	  set_demand (DEMAND_LMUL, rule.demand_lmul_p);
+	  set_demand (DEMAND_RATIO, rule.demand_ratio_p);
+	  set_demand (DEMAND_GE_SEW, rule.demand_ge_sew_p);
+	  set_sew (rule.new_sew (info1, info2));
+	  set_vlmul (rule.new_vlmul (info1, info2));
+	  set_ratio (rule.new_ratio (info1, info2));
+	  return;
+	}
+      if (rule.pair.match_cond_p (info2.get_demands (), info1.get_demands ()))
+	{
+	  set_demand (DEMAND_SEW, rule.demand_sew_p);
+	  set_demand (DEMAND_LMUL, rule.demand_lmul_p);
+	  set_demand (DEMAND_RATIO, rule.demand_ratio_p);
+	  set_demand (DEMAND_GE_SEW, rule.demand_ge_sew_p);
+	  set_sew (rule.new_sew (info2, info1));
+	  set_vlmul (rule.new_vlmul (info2, info1));
+	  set_ratio (rule.new_ratio (info2, info1));
+	  return;
+	}
+    }
+  gcc_unreachable ();
+}
+
+void
+vector_insn_info::fuse_tail_policy (const vector_insn_info &info1,
+				    const vector_insn_info &info2)
+{
+  if (info1.demand_p (DEMAND_TAIL_POLICY))
+    {
+      set_ta (info1.get_ta ());
+      demand (DEMAND_TAIL_POLICY);
+    }
+  else if (info2.demand_p (DEMAND_TAIL_POLICY))
+    {
+      set_ta (info2.get_ta ());
+      demand (DEMAND_TAIL_POLICY);
+    }
+  else
+    set_ta (get_default_ta ());
+}
+
+void
+vector_insn_info::fuse_mask_policy (const vector_insn_info &info1,
+				    const vector_insn_info &info2)
+{
+  if (info1.demand_p (DEMAND_MASK_POLICY))
+    {
+      set_ma (info1.get_ma ());
+      demand (DEMAND_MASK_POLICY);
+    }
+  else if (info2.demand_p (DEMAND_MASK_POLICY))
+    {
+      set_ma (info2.get_ma ());
+      demand (DEMAND_MASK_POLICY);
+    }
+  else
+    set_ma (get_default_ma ());
+}
+
 vector_insn_info
 vector_insn_info::merge (const vector_insn_info &merge_info,
-			 enum merge_type type = LOCAL_MERGE) const
+			 enum merge_type type) const
 {
-  gcc_assert (this->compatible_p (merge_info)
-	      && "Can't merge incompatible demanded infos");
+  if (!vsetvl_insn_p (get_insn ()->rtl ()))
+    gcc_assert (this->compatible_p (merge_info)
+		&& "Can't merge incompatible demanded infos");
 
   vector_insn_info new_info;
-  new_info.demand_vl_vtype ();
-
+  new_info.set_valid ();
   if (type == LOCAL_MERGE)
     {
       /* For local backward data flow, we always update INSN && AVL as the
-	 latest INSN and AVL so that we can keep track status of each INSN.*/
-      new_info.set_insn (merge_info.get_insn ());
-      if (merge_info.demand_p (DEMAND_AVL))
-	new_info.set_avl_info (merge_info.get_avl_info ());
-      else if (demand_p (DEMAND_AVL))
-	new_info.set_avl_info (get_avl_info ());
+	 latest INSN and AVL so that we can keep track status of each INSN.  */
+      new_info.fuse_avl (merge_info, *this);
     }
   else
     {
       /* For global data flow, we should keep original INSN and AVL if they
-	 valid since we should keep the life information of each block.
+      valid since we should keep the life information of each block.
 
-	 For example:
-	   bb 0 -> bb 1.
-	 We should keep INSN && AVL of bb 1 since we will eventually emit
-	 vsetvl instruction according to INSN and AVL of bb 1.  */
-      new_info.set_insn (get_insn ());
-      if (demand_p (DEMAND_AVL))
-	new_info.set_avl_info (get_avl_info ());
-      else if (merge_info.demand_p (DEMAND_AVL))
-	new_info.set_avl_info (merge_info.get_avl_info ());
+      For example:
+	bb 0 -> bb 1.
+      We should keep INSN && AVL of bb 1 since we will eventually emit
+      vsetvl instruction according to INSN and AVL of bb 1.  */
+      new_info.fuse_avl (*this, merge_info);
     }
 
-  if (!demand_p (DEMAND_AVL) && !merge_info.demand_p (DEMAND_AVL))
-    new_info.undemand (DEMAND_AVL);
-  if (!demand_p (DEMAND_SEW) && !merge_info.demand_p (DEMAND_SEW))
-    new_info.undemand (DEMAND_SEW);
-  if (!demand_p (DEMAND_LMUL) && !merge_info.demand_p (DEMAND_LMUL))
-    new_info.undemand (DEMAND_LMUL);
-
-  if (!demand_p (DEMAND_TAIL_POLICY)
-      && !merge_info.demand_p (DEMAND_TAIL_POLICY))
-    new_info.undemand (DEMAND_TAIL_POLICY);
-  if (!demand_p (DEMAND_MASK_POLICY)
-      && !merge_info.demand_p (DEMAND_MASK_POLICY))
-    new_info.undemand (DEMAND_MASK_POLICY);
-
-  if (merge_info.demand_p (DEMAND_SEW))
-    new_info.set_sew (merge_info.get_sew ());
-  else if (demand_p (DEMAND_SEW))
-    new_info.set_sew (get_sew ());
-
-  if (merge_info.demand_p (DEMAND_LMUL))
-    new_info.set_vlmul (merge_info.get_vlmul ());
-  else if (demand_p (DEMAND_LMUL))
-    new_info.set_vlmul (get_vlmul ());
-
-  if (!new_info.demand_p (DEMAND_SEW) && !new_info.demand_p (DEMAND_LMUL))
-    {
-      if (demand_p (DEMAND_RATIO) || merge_info.demand_p (DEMAND_RATIO))
-	new_info.demand (DEMAND_RATIO);
-      /* Even though we don't demand_p SEW && VLMUL in this case, we still
-       * need them.  */
-      if (merge_info.demand_p (DEMAND_RATIO))
-	{
-	  new_info.set_sew (merge_info.get_sew ());
-	  new_info.set_vlmul (merge_info.get_vlmul ());
-	  new_info.set_ratio (merge_info.get_ratio ());
-	}
-      else if (demand_p (DEMAND_RATIO))
-	{
-	  new_info.set_sew (get_sew ());
-	  new_info.set_vlmul (get_vlmul ());
-	  new_info.set_ratio (get_ratio ());
-	}
-    }
-  else
-    {
-      /* when get_attr_ratio is invalid, this kind of instructions
-	 doesn't care about ratio. However, we still need this value
-	 in demand_p info backward analysis.  */
-      new_info.set_ratio (
-	calculate_ratio (new_info.get_sew (), new_info.get_vlmul ()));
-    }
-
-  if (merge_info.demand_p (DEMAND_TAIL_POLICY))
-    new_info.set_ta (merge_info.get_ta ());
-  else if (demand_p (DEMAND_TAIL_POLICY))
-    new_info.set_ta (get_ta ());
-  else
-    new_info.set_ta (get_default_ta ());
-
-  if (merge_info.demand_p (DEMAND_MASK_POLICY))
-    new_info.set_ma (merge_info.get_ma ());
-  else if (demand_p (DEMAND_MASK_POLICY))
-    new_info.set_ma (get_ma ());
-  else
-    new_info.set_ma (get_default_ma ());
-
+  new_info.fuse_sew_lmul (*this, merge_info);
+  new_info.fuse_tail_policy (*this, merge_info);
+  new_info.fuse_mask_policy (*this, merge_info);
   return new_info;
+}
+
+bool
+vector_insn_info::update_fault_first_load_avl (insn_info *insn)
+{
+  // Update AVL to vl-output of the fault first load.
+  const insn_info *read_vl = get_forward_read_vl_insn (insn);
+  if (read_vl)
+    {
+      rtx vl = SET_DEST (PATTERN (read_vl->rtl ()));
+      def_info *def = find_access (read_vl->defs (), REGNO (vl));
+      set_info *set = safe_dyn_cast<set_info *> (def);
+      set_avl_info (avl_info (vl, set));
+      set_insn (insn);
+      return true;
+    }
+  return false;
+}
+
+static const char *
+vlmul_to_str (vlmul_type vlmul)
+{
+  switch (vlmul)
+    {
+    case LMUL_1:
+      return "m1";
+    case LMUL_2:
+      return "m2";
+    case LMUL_4:
+      return "m4";
+    case LMUL_8:
+      return "m8";
+    case LMUL_RESERVED:
+      return "INVALID LMUL";
+    case LMUL_F8:
+      return "mf8";
+    case LMUL_F4:
+      return "mf4";
+    case LMUL_F2:
+      return "mf2";
+
+    default:
+      gcc_unreachable ();
+    }
+}
+
+static const char *
+policy_to_str (bool agnostic_p)
+{
+  return agnostic_p ? "agnostic" : "undisturbed";
 }
 
 void
@@ -1512,13 +2286,17 @@ vector_insn_info::dump (FILE *file) const
     fprintf (file, "UNKNOWN,");
   else if (empty_p ())
     fprintf (file, "EMPTY,");
+  else if (hard_empty_p ())
+    fprintf (file, "HARD_EMPTY,");
   else if (dirty_with_killed_avl_p ())
     fprintf (file, "DIRTY_WITH_KILLED_AVL,");
   else
     fprintf (file, "DIRTY,");
 
   fprintf (file, "Demand field={%d(VL),", demand_p (DEMAND_AVL));
+  fprintf (file, "%d(DEMAND_NONZERO_AVL),", demand_p (DEMAND_NONZERO_AVL));
   fprintf (file, "%d(SEW),", demand_p (DEMAND_SEW));
+  fprintf (file, "%d(DEMAND_GE_SEW),", demand_p (DEMAND_GE_SEW));
   fprintf (file, "%d(LMUL),", demand_p (DEMAND_LMUL));
   fprintf (file, "%d(RATIO),", demand_p (DEMAND_RATIO));
   fprintf (file, "%d(TAIL_POLICY),", demand_p (DEMAND_TAIL_POLICY));
@@ -1527,10 +2305,10 @@ vector_insn_info::dump (FILE *file) const
   fprintf (file, "AVL=");
   print_rtl_single (file, get_avl ());
   fprintf (file, "SEW=%d,", get_sew ());
-  fprintf (file, "VLMUL=%d,", get_vlmul ());
+  fprintf (file, "VLMUL=%s,", vlmul_to_str (get_vlmul ()));
   fprintf (file, "RATIO=%d,", get_ratio ());
-  fprintf (file, "TAIL_POLICY=%d,", get_ta ());
-  fprintf (file, "MASK_POLICY=%d", get_ma ());
+  fprintf (file, "TAIL_POLICY=%s,", policy_to_str (get_ta ()));
+  fprintf (file, "MASK_POLICY=%s", policy_to_str (get_ma ()));
   fprintf (file, "]\n");
 
   if (valid_p ())
@@ -1605,9 +2383,24 @@ vector_infos_manager::get_all_available_exprs (
 {
   auto_vec<size_t> available_list;
   for (size_t i = 0; i < vector_exprs.length (); i++)
-    if (info >= *vector_exprs[i])
+    if (info.available_p (*vector_exprs[i]))
       available_list.safe_push (i);
   return available_list;
+}
+
+bool
+vector_infos_manager::all_empty_predecessor_p (const basic_block cfg_bb) const
+{
+  hash_set<basic_block> pred_cfg_bbs = get_all_predecessors (cfg_bb);
+  for (const basic_block pred_cfg_bb : pred_cfg_bbs)
+    {
+      const auto &pred_block_info = vector_block_infos[pred_cfg_bb->index];
+      if (!pred_block_info.local_dem.valid_or_dirty_p ()
+	  && !pred_block_info.reaching_out.valid_or_dirty_p ())
+	continue;
+      return false;
+    }
+  return true;
 }
 
 bool
@@ -1627,6 +2420,26 @@ vector_infos_manager::all_same_ratio_p (sbitmap bitdata) const
     else if (vector_exprs[bb_index]->get_ratio () != ratio)
       return false;
   }
+  return true;
+}
+
+/* Return TRUE if the incoming vector configuration state
+   to CFG_BB is compatible with the vector configuration
+   state in CFG_BB, FALSE otherwise.  */
+bool
+vector_infos_manager::all_avail_in_compatible_p (const basic_block cfg_bb) const
+{
+  const auto &info = vector_block_infos[cfg_bb->index].local_dem;
+  sbitmap avin = vector_avin[cfg_bb->index];
+  unsigned int bb_index;
+  sbitmap_iterator sbi;
+  EXECUTE_IF_SET_IN_BITMAP (avin, 0, bb_index, sbi)
+    {
+      const auto &avin_info
+	= static_cast<const vl_vtype_info &> (*vector_exprs[bb_index]);
+      if (!info.compatible_p (avin_info))
+	return false;
+    }
   return true;
 }
 
@@ -1673,6 +2486,8 @@ vector_infos_manager::release (void)
   if (!vector_exprs.is_empty ())
     vector_exprs.release ();
 
+  gcc_assert (to_refine_vsetvls.is_empty ());
+  gcc_assert (to_delete_vsetvls.is_empty ());
   if (optimize > 0)
     free_bitmap_vectors ();
 }
@@ -1844,7 +2659,15 @@ const pass_data pass_data_vsetvl = {
 class pass_vsetvl : public rtl_opt_pass
 {
 private:
-  class vector_infos_manager *m_vector_manager;
+  vector_infos_manager *m_vector_manager;
+
+  const vector_insn_info &get_vector_info (const rtx_insn *) const;
+  const vector_insn_info &get_vector_info (const insn_info *) const;
+  const vector_block_info &get_block_info (const basic_block) const;
+  const vector_block_info &get_block_info (const bb_info *) const;
+  vector_block_info &get_block_info (const basic_block);
+  vector_block_info &get_block_info (const bb_info *);
+  void update_vector_info (const insn_info *, const vector_insn_info &);
 
   void simple_vsetvl (void) const;
   void lazy_vsetvl (void);
@@ -1861,21 +2684,28 @@ private:
   /* Phase 3.  */
   enum fusion_type get_backward_fusion_type (const bb_info *,
 					     const vector_insn_info &);
+  bool hard_empty_block_p (const bb_info *, const vector_insn_info &) const;
   bool backward_demand_fusion (void);
   bool forward_demand_fusion (void);
+  bool cleanup_illegal_dirty_blocks (void);
   void demand_fusion (void);
 
   /* Phase 4.  */
   void prune_expressions (void);
   void compute_local_properties (void);
-  bool can_refine_vsetvl_p (const basic_block, uint8_t) const;
+  bool can_refine_vsetvl_p (const basic_block, const vector_insn_info &) const;
   void refine_vsetvls (void) const;
   void cleanup_vsetvls (void);
   bool commit_vsetvls (void);
   void pre_vsetvl (void);
 
   /* Phase 5.  */
+  rtx_insn *get_vsetvl_at_end (const bb_info *, vector_insn_info *) const;
+  void local_eliminate_vsetvl_insn (const bb_info *) const;
   void cleanup_insns (void) const;
+
+  /* Phase 6.  */
+  void propagate_avl (void) const;
 
   void init (void);
   void done (void);
@@ -1888,6 +2718,49 @@ public:
   virtual bool gate (function *) final override { return TARGET_VECTOR; }
   virtual unsigned int execute (function *) final override;
 }; // class pass_vsetvl
+
+const vector_insn_info &
+pass_vsetvl::get_vector_info (const rtx_insn *i) const
+{
+  return m_vector_manager->vector_insn_infos[INSN_UID (i)];
+}
+
+const vector_insn_info &
+pass_vsetvl::get_vector_info (const insn_info *i) const
+{
+  return m_vector_manager->vector_insn_infos[i->uid ()];
+}
+
+const vector_block_info &
+pass_vsetvl::get_block_info (const basic_block bb) const
+{
+  return m_vector_manager->vector_block_infos[bb->index];
+}
+
+const vector_block_info &
+pass_vsetvl::get_block_info (const bb_info *bb) const
+{
+  return m_vector_manager->vector_block_infos[bb->index ()];
+}
+
+vector_block_info &
+pass_vsetvl::get_block_info (const basic_block bb)
+{
+  return m_vector_manager->vector_block_infos[bb->index];
+}
+
+vector_block_info &
+pass_vsetvl::get_block_info (const bb_info *bb)
+{
+  return m_vector_manager->vector_block_infos[bb->index ()];
+}
+
+void
+pass_vsetvl::update_vector_info (const insn_info *i,
+				 const vector_insn_info &new_info)
+{
+  m_vector_manager->vector_insn_infos[i->uid ()] = new_info;
+}
 
 /* Simple m_vsetvl_insert vsetvl for optimize == 0.  */
 void
@@ -1909,8 +2782,7 @@ pass_vsetvl::simple_vsetvl (void) const
 	    continue;
 	  if (has_vtype_op (rinsn))
 	    {
-	      const auto info
-		= m_vector_manager->vector_insn_infos[INSN_UID (rinsn)];
+	      const auto info = get_vector_info (rinsn);
 	      emit_vsetvl_insn (VSETVL_DISCARD_RESULT, EMIT_BEFORE, info,
 				NULL_RTX, rinsn);
 	    }
@@ -1930,18 +2802,29 @@ pass_vsetvl::compute_local_backward_infos (const bb_info *bb)
 
   for (insn_info *insn : bb->reverse_real_nondebug_insns ())
     {
-      auto &info = m_vector_manager->vector_insn_infos[insn->uid ()];
+      auto &info = get_vector_info (insn);
 
       if (info.uninit_p ())
 	/* If it is uninitialized, propagate it directly.  */
-	info = change;
+	update_vector_info (insn, change);
       else if (info.unknown_p ())
 	change = info;
       else
 	{
 	  gcc_assert (info.valid_p () && "Unexpected Invalid demanded info");
-	  if (change.valid_p () && change.compatible_p (info))
-	    info = change.merge (info);
+	  if (change.valid_p ())
+	    {
+	      if (!(propagate_avl_across_demands_p (change, info)
+		    && !reg_available_p (insn, change))
+		  && change.compatible_p (info))
+		{
+		  update_vector_info (insn, change.merge (info, LOCAL_MERGE));
+		  /* Fix PR109399, we should update user vsetvl instruction
+		     if there is a change in demand fusion.  */
+		  if (vsetvl_insn_p (insn->rtl ()))
+		    change_vsetvl_insn (insn, info);
+		}
+	    }
 	  change = info;
 	}
     }
@@ -1960,7 +2843,7 @@ pass_vsetvl::need_vsetvl (const vector_insn_info &require,
   if (!curr_info.valid_p () || curr_info.unknown_p () || curr_info.uninit_p ())
     return true;
 
-  if (require.compatible_p (curr_info))
+  if (require.compatible_p (static_cast<const vl_vtype_info &> (curr_info)))
     return false;
 
   return true;
@@ -1975,8 +2858,7 @@ pass_vsetvl::transfer_before (vector_insn_info &info, insn_info *insn) const
   if (!has_vtype_op (insn->rtl ()))
     return;
 
-  const vector_insn_info require
-    = m_vector_manager->vector_insn_infos[insn->uid ()];
+  const vector_insn_info require = get_vector_info (insn);
   if (info.valid_p () && !need_vsetvl (require, info))
     return;
   info = require;
@@ -1990,11 +2872,13 @@ pass_vsetvl::transfer_after (vector_insn_info &info, insn_info *insn) const
 {
   if (vector_config_insn_p (insn->rtl ()))
     {
-      info = m_vector_manager->vector_insn_infos[insn->uid ()];
+      info = get_vector_info (insn);
       return;
     }
 
-  /* TODO: Support fault first load info update VL in the future.  */
+  if (fault_first_load_p (insn->rtl ())
+      && info.update_fault_first_load_avl (insn))
+    return;
 
   /* If this is something that updates VL/VTYPE that we don't know about, set
      the state to unknown.  */
@@ -2016,6 +2900,7 @@ pass_vsetvl::emit_local_forward_vsetvls (const bb_info *bb)
   for (insn_info *insn : bb->real_nondebug_insns ())
     {
       const vector_insn_info prev_info = curr_info;
+      enum vsetvl_type type = NUM_VSETVL_TYPE;
       transfer_before (curr_info, insn);
 
       if (has_vtype_op (insn->rtl ()))
@@ -2023,14 +2908,28 @@ pass_vsetvl::emit_local_forward_vsetvls (const bb_info *bb)
 	  if (static_cast<const vl_vtype_info &> (prev_info)
 	      != static_cast<const vl_vtype_info &> (curr_info))
 	    {
-	      const auto require
-		= m_vector_manager->vector_insn_infos[insn->uid ()];
+	      const auto require = get_vector_info (insn);
 	      if (!require.compatible_p (
 		    static_cast<const vl_vtype_info &> (prev_info)))
-		insert_vsetvl (EMIT_BEFORE, insn->rtl (), require, prev_info);
+		type = insert_vsetvl (EMIT_BEFORE, insn->rtl (), require,
+				      prev_info);
 	    }
 	}
 
+      /* Fix the issue of following sequence:
+	 vsetivli zero, 5
+	 ....
+	 vsetvli zero, zero
+	 vmv.x.s (demand AVL = 8).
+	 ....
+	 incorrect: vsetvli zero, zero ===> Since the curr_info is AVL = 8.
+	 correct: vsetivli zero, 8
+	 vadd (demand AVL = 8).  */
+      if (type == VSETVL_VTYPE_CHANGE_ONLY)
+	{
+	  /* Update the curr_info to be real correct AVL.  */
+	  curr_info.set_avl_info (prev_info.get_avl_info ());
+	}
       transfer_after (curr_info, insn);
     }
 
@@ -2055,7 +2954,7 @@ pass_vsetvl::get_backward_fusion_type (const bb_info *bb,
   rtx reg = NULL_RTX;
 
   /* Case 1: Don't need VL. Just let it backward propagate.  */
-  if (!has_vl_op (insn->rtl ()))
+  if (!prop.demand_p (DEMAND_AVL))
     return VALID_AVL_FUSION;
   else
     {
@@ -2069,143 +2968,248 @@ pass_vsetvl::get_backward_fusion_type (const bb_info *bb,
 	  gcc_assert (prop.has_avl_reg ());
 	  if (vlmax_avl_p (prop.get_avl ()))
 	    /* Check VL operand for vsetvl vl,zero.  */
-	    reg = get_vl (insn->rtl ());
+	    reg = prop.get_avl_reg_rtx ();
 	  else
 	    /* Check AVL operand for vsetvl zero,avl.  */
-	    reg = get_avl (insn->rtl ());
+	    reg = prop.get_avl ();
 	}
     }
 
   gcc_assert (reg);
-  def_info *def = find_access (insn->uses (), REGNO (reg))->def ();
-  if (def->insn ()->is_phi ())
+  if (!prop.get_avl_source ()->insn ()->is_phi ()
+      && prop.get_avl_source ()->insn ()->bb () == insn->bb ())
+    return INVALID_FUSION;
+  hash_set<set_info *> sets
+    = get_all_sets (prop.get_avl_source (), true, true, true);
+  if (any_set_in_bb_p (sets, insn->bb ()))
+    return INVALID_FUSION;
+
+  if (vlmax_avl_p (prop.get_avl ()))
     {
-      hash_set<insn_info *> insns
-	= get_all_nonphi_defs (as_a<phi_info *> (def));
-      if (any_insn_in_bb_p (insns, insn->bb ()))
+      if (find_reg_killed_by (bb, reg))
 	return INVALID_FUSION;
-    }
-  else
-    {
-      if (def->insn ()->bb () == insn->bb ())
-	return INVALID_FUSION;
+      else
+	return VALID_AVL_FUSION;
     }
 
-  rtx new_reg = gen_rtx_REG (GET_MODE (reg), REGNO (reg));
-  gcc_assert (new_reg != reg);
-  const avl_info info = avl_info (new_reg, safe_dyn_cast<set_info *> (def));
-  if (prop.dirty_with_killed_avl_p ())
+  /* By default, we always enable backward fusion so that we can
+     gain more optimizations.  */
+  if (!find_reg_killed_by (bb, reg))
+    return VALID_AVL_FUSION;
+  return KILLED_AVL_FUSION;
+}
+
+/* We almost enable all cases in get_backward_fusion_type, this function
+   disable the backward fusion by changing dirty blocks into hard empty
+   blocks in forward dataflow. We can have more accurate optimization by
+   this method.  */
+bool
+pass_vsetvl::hard_empty_block_p (const bb_info *bb,
+				 const vector_insn_info &info) const
+{
+  if (!info.dirty_p () || !info.has_avl_reg ())
+    return false;
+
+  basic_block cfg_bb = bb->cfg_bb ();
+  sbitmap avin = m_vector_manager->vector_avin[cfg_bb->index];
+  set_info *set = info.get_avl_source ();
+  rtx avl = gen_rtx_REG (Pmode, set->regno ());
+  hash_set<set_info *> sets = get_all_sets (set, true, false, false);
+  hash_set<basic_block> pred_cfg_bbs = get_all_predecessors (cfg_bb);
+
+  if (find_reg_killed_by (bb, avl))
     {
-      unsigned int bb_index;
-      sbitmap_iterator sbi;
-      sbitmap bitdata = m_vector_manager->vector_avout[bb->index ()];
-      bool has_valid_avl = false;
-      EXECUTE_IF_SET_IN_BITMAP (bitdata, 0, bb_index, sbi)
-      {
-	const vector_insn_info *expr = m_vector_manager->vector_exprs[bb_index];
-	if (expr->compatible_avl_p (info))
-	  {
-	    has_valid_avl = true;
-	    break;
-	  }
-      }
-      if (!has_valid_avl)
-	return INVALID_FUSION;
+      /* Condition 1:
+	 Dirty block with killed AVL means that the empty block (no RVV
+	 instructions) are polluted as Dirty blocks with the value of current
+	 AVL is killed. For example:
+	      bb 0:
+		...
+	      bb 1:
+		def a5
+	      bb 2:
+		RVV (use a5)
+	 In backward dataflow, we will polluted BB0 and BB1 as Dirt with AVL
+	 killed. since a5 is killed in BB1.
+	 In this case, let's take a look at this example:
+
+	      bb 3:        bb 4:
+		def3 a5       def4 a5
+	      bb 5:        bb 6:
+		def1 a5       def2 a5
+		    \         /
+		     \       /
+		      \     /
+		       \   /
+			bb 7:
+		    RVV (use a5)
+	 In thi case, we can polluted BB5 and BB6 as dirty if get-def
+	 of a5 from RVV instruction in BB7 is the def1 in BB5 and
+	 def2 BB6 so we can return false early here for HARD_EMPTY_BLOCK_P.
+	 However, we are not sure whether BB3 and BB4 can be
+	 polluted as Dirty with AVL killed so we can't return false
+	 for HARD_EMPTY_BLOCK_P here since it's too early which will
+	 potentially produce issues.  */
+      gcc_assert (info.dirty_with_killed_avl_p ());
+      if (info.get_avl_source ()
+	  && get_same_bb_set (sets, bb->cfg_bb ()) == info.get_avl_source ())
+	return false;
     }
 
-  if (reg_killed_by_bb_p (bb, reg))
+  /* Condition 2:
+     Suppress the VL/VTYPE info backward propagation too early:
+			 ________
+			|   BB0  |
+			|________|
+			    |
+			____|____
+			|   BB1  |
+			|________|
+     In this case, suppose BB 1 has multiple predecessors, BB 0 is one
+     of them. BB1 has VL/VTYPE info (may be VALID or DIRTY) to backward
+     propagate.
+     The AVIN (available in) which is calculated by LCM is empty only
+     in these 2 circumstances:
+       1. all predecessors of BB1 are empty (not VALID
+	  and can not be polluted in backward fusion flow)
+       2. VL/VTYPE info of BB1 predecessors are conflict.
+
+     We keep it as dirty in 2nd circumstance and set it as HARD_EMPTY
+     (can not be polluted as DIRTY any more) in 1st circumstance.
+     We don't backward propagate in 1st circumstance since there is
+     no VALID RVV instruction and no polluted blocks (dirty blocks)
+     by backward propagation from other following blocks.
+     It's meaningless to keep it as Dirty anymore.
+
+     However, since we keep it as dirty in 2nd since there are VALID or
+     Dirty blocks in predecessors, we can still gain the benefits and
+     optimization opportunities. For example, in this case:
+	for (size_t i = 0; i < n; i++)
+	 {
+	   if (i != cond) {
+	     vint8mf8_t v = *(vint8mf8_t*)(in + i + 100);
+	     *(vint8mf8_t*)(out + i + 100) = v;
+	   } else {
+	     vbool1_t v = *(vbool1_t*)(in + i + 400);
+	     *(vbool1_t*)(out + i + 400) = v;
+	   }
+	 }
+     VL/VTYPE in if-else are conflict which will produce empty AVIN LCM result
+     but we can still keep dirty blocks if *(i != cond)* is very unlikely then
+     we can preset vsetvl (VL/VTYPE) info from else (static propability model).
+
+     We don't want to backward propagate VL/VTYPE information too early
+     which is not the optimal and may potentially produce issues.  */
+  if (bitmap_empty_p (avin))
     {
-      unsigned int bb_index;
-      sbitmap_iterator sbi;
-      sbitmap bitdata = m_vector_manager->vector_avin[bb->index ()];
-      hash_set<basic_block> blocks = get_all_predecessors (bb->cfg_bb ());
-      for (const auto block : blocks)
-	if (block == insn->bb ()->cfg_bb ())
-	  return INVALID_FUSION;
-      if (bitmap_empty_p (bitdata))
+      bool hard_empty_p = true;
+      for (const basic_block pred_cfg_bb : pred_cfg_bbs)
 	{
-	  /* void f (int8_t *restrict in, int8_t *restrict out, int n, int m,
-		    unsigned cond, size_t vl)
-	  {
-	    vbool64_t mask = *(vbool64_t *) (in + 1000000);
-
-	    vl = 101;
-	    if (cond > 0)
-	      {
-	      vint8mf8_t v = __riscv_vle8_v_i8mf8 (in, vl);
-	      __riscv_vse8_v_i8mf8 (out, v, vl);
-	      }
-	    else
-	      {
-	      out[100] = out[100] + 300;
-	      }
-
-	    for (size_t i = 0; i < n; i++)
-	      {
-	      vfloat32mf2_t v = __riscv_vle32_v_f32mf2 ((in + i + 200), vl);
-	      __riscv_vse32_v_f32mf2 ((out + i + 200), v, vl);
-
-	      vfloat32mf2_t v2
-		= __riscv_vle32_v_f32mf2_tumu (mask, v, (in + i + 300), vl);
-	      __riscv_vse32_v_f32mf2_m (mask, (out + i + 300), v2, vl);
-	      }
-	  }  */
-	  for (const auto block : blocks)
+	  if (pred_cfg_bb == ENTRY_BLOCK_PTR_FOR_FN (cfun))
+	    continue;
+	  sbitmap avout = m_vector_manager->vector_avout[pred_cfg_bb->index];
+	  if (!bitmap_empty_p (avout))
 	    {
-	      if (block == ENTRY_BLOCK_PTR_FOR_FN (cfun))
-		continue;
-	      sbitmap avout = m_vector_manager->vector_avout[block->index];
-	      EXECUTE_IF_SET_IN_BITMAP (avout, 0, bb_index, sbi)
-	      {
-		const vector_insn_info *expr
-		  = m_vector_manager->vector_exprs[bb_index];
-		if (expr->compatible_avl_p (info))
-		  return KILLED_AVL_FUSION;
-	      }
+	      hard_empty_p = false;
+	      break;
 	    }
-	  return INVALID_FUSION;
+	}
+      if (hard_empty_p)
+	return true;
+    }
+
+  edge e;
+  edge_iterator ei;
+  bool has_avl_killed_insn_p = false;
+  FOR_EACH_EDGE (e, ei, cfg_bb->succs)
+    {
+      const auto block_info
+	= m_vector_manager->vector_block_infos[e->dest->index];
+      if (block_info.local_dem.dirty_with_killed_avl_p ())
+	{
+	  has_avl_killed_insn_p = true;
+	  break;
+	}
+    }
+  if (!has_avl_killed_insn_p)
+    return false;
+
+  bool any_set_in_bbs_p = false;
+  for (const basic_block pred_cfg_bb : pred_cfg_bbs)
+    {
+      insn_info *def_insn = extract_single_source (set);
+      if (def_insn)
+	{
+	  /* Condition 3:
+
+	    Case 1:                               Case 2:
+		bb 0:                                 bb 0:
+		  def a5 101                             ...
+		bb 1:                                 bb 1:
+		  ...                                    ...
+		bb 2:                                 bb 2:
+		  RVV 1 (use a5 with TAIL ANY)           ...
+		bb 3:                                 bb 3:
+		  def a5 101                             def a5 101
+		bb 4:                                 bb 4:
+		  ...                                    ...
+		bb 5:                                 bb 5:
+		  RVV 2 (use a5 with TU)                 RVV 1 (use a5)
+
+	    Case 1: We can pollute BB3,BB2,BB1,BB0 are all Dirt blocks
+	    with killed AVL so that we can merge TU demand info from RVV 2
+	    into RVV 1 and elide the vsevl instruction in BB5.
+
+	    TODO: We only optimize for single source def since multiple source
+	    def is quite complicated.
+
+	    Case 2: We only can pollute bb 3 as dirty and it has been accepted
+	    in Condition 2 and we can't pollute BB3,BB2,BB1,BB0 like case 1. */
+	  insn_info *last_killed_insn
+	    = find_reg_killed_by (crtl->ssa->bb (pred_cfg_bb), avl);
+	  if (!last_killed_insn || pred_cfg_bb == def_insn->bb ()->cfg_bb ())
+	    continue;
+	  if (source_equal_p (last_killed_insn, def_insn))
+	    {
+	      any_set_in_bbs_p = true;
+	      break;
+	    }
 	}
       else
 	{
-	  /* void f (int8_t * restrict in, int8_t * restrict out, int n, int
-	      m, unsigned cond, size_t vl)
-	      {
-		vbool64_t mask = *(vbool64_t *) (in + 1000000);
+	  /* Condition 4:
 
-		vl = 101;
-		if (cond > 0)
-		  {
-		  vint8mf8_t v = __riscv_vle8_v_i8mf8 (in, vl);
-		  __riscv_vse8_v_i8mf8 (out, v, vl);
-		  }
-		else
-		  {
-		  vint8mf8_t v = __riscv_vle8_v_i8mf8 (in + 1000, vl);
-		  __riscv_vse8_v_i8mf8 (out + 1000, v, vl);
-		  }
-
-		for (size_t i = 0; i < n; i++)
-		  {
-		  vfloat32mf2_t v = __riscv_vle32_v_f32mf2 ((in + i + 200), vl);
-		  __riscv_vse32_v_f32mf2 ((out + i + 200), v, vl);
-
-		  vfloat32mf2_t v2
-		    = __riscv_vle32_v_f32mf2_tumu (mask, v, (in + i + 300), vl);
-		  __riscv_vse32_v_f32mf2_m (mask, (out + i + 300), v2, vl);
-		  }
-	  }  */
-	  EXECUTE_IF_SET_IN_BITMAP (bitdata, 0, bb_index, sbi)
-	  {
-	    const vector_insn_info *expr
-	      = m_vector_manager->vector_exprs[bb_index];
-	    if (expr->compatible_avl_p (info))
-	      return KILLED_AVL_FUSION;
-	  }
+	      bb 0:        bb 1:         bb 3:
+		def1 a5       def2 a5     ...
+		    \         /            /
+		     \       /            /
+		      \     /            /
+		       \   /            /
+			bb 4:          /
+			 |            /
+			 |           /
+			bb 5:       /
+			 |         /
+			 |        /
+			bb 6:    /
+			 |      /
+			 |     /
+			  bb 8:
+			RVV 1 (use a5)
+	  If we get-def (REAL) of a5 from RVV 1 instruction, we will get
+	  def1 from BB0 and def2 from BB1. So we will pollute BB6,BB5,BB4,
+	  BB0,BB1 with DIRTY and set BB3 as HARD_EMPTY so that we won't
+	  propagate AVL to BB3.  */
+	  if (any_set_in_bb_p (sets, crtl->ssa->bb (pred_cfg_bb)))
+	    {
+	      any_set_in_bbs_p = true;
+	      break;
+	    }
 	}
-      return INVALID_FUSION;
     }
-
-  return prop.dirty_with_killed_avl_p () ? KILLED_AVL_FUSION : VALID_AVL_FUSION;
+  if (!any_set_in_bbs_p)
+    return true;
+  return false;
 }
 
 /* Compute global backward demanded info.  */
@@ -2252,6 +3256,14 @@ pass_vsetvl::backward_demand_fusion (void)
       if (!backward_propagate_worthwhile_p (cfg_bb, curr_block_info))
 	continue;
 
+      /* Fix PR108270:
+
+		bb 0 -> bb 1
+	 We don't need to backward fuse VL/VTYPE info from bb 1 to bb 0
+	 if bb 1 is not inside a loop and all predecessors of bb 0 are empty. */
+      if (m_vector_manager->all_empty_predecessor_p (cfg_bb))
+	continue;
+
       edge e;
       edge_iterator ei;
       /* Backward propagate to each predecessor.  */
@@ -2265,8 +3277,16 @@ pass_vsetvl::backward_demand_fusion (void)
 	    continue;
 	  if (e->src->index == ENTRY_BLOCK_PTR_FOR_FN (cfun)->index)
 	    continue;
+	  /* If prop is demand of vsetvl instruction and reaching doesn't demand
+	     AVL. We don't backward propagate since vsetvl instruction has no
+	     side effects.  */
+	  if (vsetvl_insn_p (prop.get_insn ()->rtl ())
+	      && propagate_avl_across_demands_p (prop, block_info.reaching_out))
+	    continue;
 
 	  if (block_info.reaching_out.unknown_p ())
+	    continue;
+	  else if (block_info.reaching_out.hard_empty_p ())
 	    continue;
 	  else if (block_info.reaching_out.empty_p ())
 	    {
@@ -2277,6 +3297,17 @@ pass_vsetvl::backward_demand_fusion (void)
 
 	      block_info.reaching_out = prop;
 	      block_info.reaching_out.set_dirty (type);
+
+	      if (prop.has_avl_reg () && !vlmax_avl_p (prop.get_avl ()))
+		{
+		  hash_set<set_info *> sets
+		    = get_all_sets (prop.get_avl_source (), true, true, true);
+		  set_info *set = get_same_bb_set (sets, e->src);
+		  if (set)
+		    block_info.reaching_out.set_avl_info (
+		      avl_info (prop.get_avl (), set));
+		}
+
 	      block_info.local_dem = block_info.reaching_out;
 	      block_info.probability = curr_block_info.probability;
 	      changed_p = true;
@@ -2288,24 +3319,38 @@ pass_vsetvl::backward_demand_fusion (void)
 
 	      if (block_info.reaching_out.compatible_p (prop))
 		{
-		  if (block_info.reaching_out >= prop)
+		  if (block_info.reaching_out.available_p (prop))
 		    continue;
-		  block_info.probability += curr_block_info.probability;
 		  new_info = block_info.reaching_out.merge (prop, GLOBAL_MERGE);
+		  new_info.set_dirty (
+		    block_info.reaching_out.dirty_with_killed_avl_p ());
+		  block_info.probability += curr_block_info.probability;
 		}
 	      else
 		{
 		  if (curr_block_info.probability > block_info.probability)
 		    {
+		      enum fusion_type type
+			= get_backward_fusion_type (crtl->ssa->bb (e->src),
+						    prop);
+		      if (type == INVALID_FUSION)
+			continue;
 		      new_info = prop;
+		      new_info.set_dirty (type);
 		      block_info.probability = curr_block_info.probability;
 		    }
 		  else
 		    continue;
 		}
 
-	      new_info.set_dirty (
-		block_info.reaching_out.dirty_with_killed_avl_p ());
+	      if (propagate_avl_across_demands_p (prop,
+						  block_info.reaching_out))
+		{
+		  rtx reg = new_info.get_avl_reg_rtx ();
+		  if (find_reg_killed_by (crtl->ssa->bb (e->src), reg))
+		    new_info.set_dirty (true);
+		}
+
 	      block_info.local_dem = new_info;
 	      block_info.reaching_out = new_info;
 	      changed_p = true;
@@ -2315,9 +3360,25 @@ pass_vsetvl::backward_demand_fusion (void)
 	      /* We not only change the info during backward propagation,
 		 but also change the VSETVL instruction.  */
 	      gcc_assert (block_info.reaching_out.valid_p ());
+	      hash_set<set_info *> sets
+		= get_all_sets (prop.get_avl_source (), true, false, false);
+	      set_info *set = get_same_bb_set (sets, e->src);
+	      if (vsetvl_insn_p (block_info.reaching_out.get_insn ()->rtl ())
+		  && prop.has_avl_reg () && !vlmax_avl_p (prop.get_avl ()))
+		{
+		  if (!block_info.reaching_out.same_vlmax_p (prop))
+		    continue;
+		  if (block_info.reaching_out.same_vtype_p (prop))
+		    continue;
+		  if (!set)
+		    continue;
+		  if (set->insn () != block_info.reaching_out.get_insn ())
+		    continue;
+		}
+
 	      if (!block_info.reaching_out.compatible_p (prop))
 		continue;
-	      if (block_info.reaching_out >= prop)
+	      if (block_info.reaching_out.available_p (prop))
 		continue;
 
 	      vector_insn_info be_merged = block_info.reaching_out;
@@ -2327,6 +3388,11 @@ pass_vsetvl::backward_demand_fusion (void)
 
 	      if (curr_block_info.probability > block_info.probability)
 		block_info.probability = curr_block_info.probability;
+
+	      if (propagate_avl_across_demands_p (prop, block_info.reaching_out)
+		  && !reg_available_p (crtl->ssa->bb (e->src)->end_insn (),
+				       new_info))
+		continue;
 
 	      change_vsetvl_insn (new_info.get_insn (), new_info);
 	      if (block_info.local_dem == block_info.reaching_out)
@@ -2374,6 +3440,9 @@ pass_vsetvl::forward_demand_fusion (void)
       if (cfg_bb == ENTRY_BLOCK_PTR_FOR_FN (cfun))
 	continue;
 
+      if (vsetvl_insn_p (prop.get_insn ()->rtl ()))
+	continue;
+
       edge e;
       edge_iterator ei;
       /* Forward propagate to each successor.  */
@@ -2396,9 +3465,11 @@ pass_vsetvl::forward_demand_fusion (void)
 	  /* If there is nothing to propagate, just skip it.  */
 	  if (!local_dem.valid_or_dirty_p ())
 	    continue;
-	  if (local_dem >= prop)
+	  if (local_dem.available_p (prop))
 	    continue;
 	  if (!local_dem.compatible_p (prop))
+	    continue;
+	  if (propagate_avl_across_demands_p (prop, local_dem))
 	    continue;
 
 	  vector_insn_info new_info = local_dem.merge (prop, GLOBAL_MERGE);
@@ -2406,8 +3477,8 @@ pass_vsetvl::forward_demand_fusion (void)
 	  if (local_dem.dirty_p ())
 	    {
 	      gcc_assert (local_dem == reaching_out);
+	      new_info.set_dirty (local_dem.dirty_with_killed_avl_p ());
 	      local_dem = new_info;
-	      local_dem.set_dirty (local_dem.dirty_with_killed_avl_p ());
 	      reaching_out = local_dem;
 	    }
 	  else
@@ -2435,9 +3506,6 @@ pass_vsetvl::demand_fusion (void)
   while (changed_p)
     {
       changed_p = false;
-      prune_expressions ();
-      m_vector_manager->create_bitmap_vectors ();
-      compute_local_properties ();
       /* To optimize the case like this:
 	 void f2 (int8_t * restrict in, int8_t * restrict out, int n, int cond)
 	   {
@@ -2471,12 +3539,22 @@ pass_vsetvl::demand_fusion (void)
 	an AVL kill instruction in bb 2 that we can't backward fuse bb 3 or
 	forward bb 1 arbitrarily. We need available information of each block to
 	help for such cases.  */
+      changed_p |= backward_demand_fusion ();
+      changed_p |= forward_demand_fusion ();
+    }
+
+  changed_p = true;
+  while (changed_p)
+    {
+      changed_p = false;
+      prune_expressions ();
+      m_vector_manager->create_bitmap_vectors ();
+      compute_local_properties ();
       compute_available (m_vector_manager->vector_comp,
 			 m_vector_manager->vector_kill,
 			 m_vector_manager->vector_avout,
 			 m_vector_manager->vector_avin);
-      changed_p |= backward_demand_fusion ();
-      changed_p |= forward_demand_fusion ();
+      changed_p |= cleanup_illegal_dirty_blocks ();
       m_vector_manager->free_bitmap_vectors ();
       if (!m_vector_manager->vector_exprs.is_empty ())
 	m_vector_manager->vector_exprs.release ();
@@ -2491,6 +3569,34 @@ pass_vsetvl::demand_fusion (void)
 	  fprintf (dump_file, "%d ", bb->index ());
       fprintf (dump_file, "\n\n");
     }
+}
+
+/* Cleanup illegal dirty blocks.  */
+bool
+pass_vsetvl::cleanup_illegal_dirty_blocks (void)
+{
+  bool changed_p = false;
+  for (const bb_info *bb : crtl->ssa->bbs ())
+    {
+      basic_block cfg_bb = bb->cfg_bb ();
+      const auto &prop
+	= m_vector_manager->vector_block_infos[cfg_bb->index].reaching_out;
+
+      /* If there is nothing to cleanup, just skip it.  */
+      if (!prop.valid_or_dirty_p ())
+	continue;
+
+      if (hard_empty_block_p (bb, prop))
+	{
+	  m_vector_manager->vector_block_infos[cfg_bb->index].local_dem
+	    = vector_insn_info::get_hard_empty ();
+	  m_vector_manager->vector_block_infos[cfg_bb->index].reaching_out
+	    = vector_insn_info::get_hard_empty ();
+	  changed_p = true;
+	  continue;
+	}
+    }
+  return changed_p;
 }
 
 /* Assemble the candidates expressions for LCM.  */
@@ -2608,18 +3714,20 @@ pass_vsetvl::compute_local_properties (void)
 	     as long as the all real def insn of avl do not come from this
 	     block. This configuration may be still missing some optimization
 	     opportunities.  */
-	  if (reg_killed_by_bb_p (bb, expr->get_avl ()))
+	  if (find_reg_killed_by (bb, expr->get_avl ()))
 	    {
-	      hash_set<insn_info *> insns = get_all_nonphi_defs (
-		safe_dyn_cast<phi_info *> (expr->get_avl_source ()));
-	      if (any_insn_in_bb_p (insns, bb))
+	      hash_set<set_info *> sets
+		= get_all_sets (expr->get_avl_source (), true, false, false);
+	      if (any_set_in_bb_p (sets, bb))
 		bitmap_clear_bit (m_vector_manager->vector_transp[curr_bb_idx],
 				  i);
 	    }
 	}
 
       /* Compute anticipatable occurrences.  */
-      if (local_dem.valid_p () || local_dem.real_dirty_p ())
+      if (local_dem.valid_p () || local_dem.real_dirty_p ()
+	  || (has_vsetvl_killed_avl_p (bb, local_dem)
+	      && vlmax_avl_p (local_dem.get_avl ())))
 	if (anticipatable_occurrence_p (bb, local_dem))
 	  bitmap_set_bit (m_vector_manager->vector_antic[curr_bb_idx],
 			  m_vector_manager->get_expr_id (local_dem));
@@ -2687,7 +3795,8 @@ pass_vsetvl::compute_local_properties (void)
 
 /* Return true if VSETVL in the block can be refined as vsetvl zero,zero.  */
 bool
-pass_vsetvl::can_refine_vsetvl_p (const basic_block cfg_bb, uint8_t ratio) const
+pass_vsetvl::can_refine_vsetvl_p (const basic_block cfg_bb,
+				  const vector_insn_info &info) const
 {
   if (!m_vector_manager->all_same_ratio_p (
 	m_vector_manager->vector_avin[cfg_bb->index]))
@@ -2699,7 +3808,9 @@ pass_vsetvl::can_refine_vsetvl_p (const basic_block cfg_bb, uint8_t ratio) const
 
   size_t expr_id
     = bitmap_first_set_bit (m_vector_manager->vector_avin[cfg_bb->index]);
-  if (m_vector_manager->vector_exprs[expr_id]->get_ratio () != ratio)
+  if (!m_vector_manager->vector_exprs[expr_id]->same_vlmax_p (info))
+    return false;
+  if (!m_vector_manager->vector_exprs[expr_id]->compatible_avl_p (info))
     return false;
 
   edge e;
@@ -2736,19 +3847,43 @@ pass_vsetvl::refine_vsetvls (void) const
   basic_block cfg_bb;
   FOR_EACH_BB_FN (cfg_bb, cfun)
     {
-      auto info = m_vector_manager->vector_block_infos[cfg_bb->index].local_dem;
+      auto info = get_block_info(cfg_bb).local_dem;
       insn_info *insn = info.get_insn ();
       if (!info.valid_p ())
 	continue;
 
       rtx_insn *rinsn = insn->rtl ();
-      if (!can_refine_vsetvl_p (cfg_bb, info.get_ratio ()))
+      if (!can_refine_vsetvl_p (cfg_bb, info))
 	continue;
 
-      if (!vector_config_insn_p (rinsn))
-	rinsn = PREV_INSN (rinsn);
-      rtx new_pat = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY, info, NULL_RTX);
-      change_insn (rinsn, new_pat);
+      /* We can't refine user vsetvl into vsetvl zero,zero since the dest
+	 will be used by the following instructions.  */
+      if (vector_config_insn_p (rinsn))
+	{
+	  m_vector_manager->to_refine_vsetvls.add (rinsn);
+	  continue;
+	}
+
+      /* If all incoming edges to a block have a vector state that is compatbile
+	 with the block. In such a case we need not emit a vsetvl in the current
+	 block.  */
+
+      gcc_assert (has_vtype_op (insn->rtl ()));
+      rinsn = PREV_INSN (insn->rtl ());
+      gcc_assert (vector_config_insn_p (PREV_INSN (insn->rtl ())));
+      if (m_vector_manager->all_avail_in_compatible_p (cfg_bb))
+	{
+	  size_t id = m_vector_manager->get_expr_id (info);
+	  if (bitmap_bit_p (m_vector_manager->vector_del[cfg_bb->index], id))
+	    continue;
+	  eliminate_insn (rinsn);
+	}
+      else
+	{
+	  rtx new_pat
+	    = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY, info, NULL_RTX);
+	  change_insn (rinsn, new_pat);
+	}
     }
 }
 
@@ -2759,7 +3894,7 @@ pass_vsetvl::cleanup_vsetvls ()
   FOR_EACH_BB_FN (cfg_bb, cfun)
     {
       auto &info
-	= m_vector_manager->vector_block_infos[cfg_bb->index].reaching_out;
+	= get_block_info(cfg_bb).reaching_out;
       gcc_assert (m_vector_manager->expr_set_num (
 		    m_vector_manager->vector_del[cfg_bb->index])
 		  <= 1);
@@ -2772,21 +3907,23 @@ pass_vsetvl::cleanup_vsetvls ()
 	      else
 		{
 		  const auto dem
-		    = m_vector_manager->vector_block_infos[cfg_bb->index]
+		    = get_block_info(cfg_bb)
 			.local_dem;
 		  gcc_assert (dem == *m_vector_manager->vector_exprs[i]);
 		  insn_info *insn = dem.get_insn ();
 		  gcc_assert (insn && insn->rtl ());
 		  rtx_insn *rinsn;
+		  /* We can't eliminate user vsetvl since the dest will be used
+		   * by the following instructions.  */
 		  if (vector_config_insn_p (insn->rtl ()))
-		    rinsn = insn->rtl ();
-		  else
 		    {
-		      gcc_assert (has_vtype_op (insn->rtl ()));
-		      rinsn = PREV_INSN (insn->rtl ());
-		      gcc_assert (
-			vector_config_insn_p (PREV_INSN (insn->rtl ())));
+		      m_vector_manager->to_delete_vsetvls.add (insn->rtl ());
+		      continue;
 		    }
+
+		  gcc_assert (has_vtype_op (insn->rtl ()));
+		  rinsn = PREV_INSN (insn->rtl ());
+		  gcc_assert (vector_config_insn_p (PREV_INSN (insn->rtl ())));
 		  eliminate_insn (rinsn);
 		}
 	    }
@@ -2839,7 +3976,7 @@ pass_vsetvl::commit_vsetvls (void)
     {
       basic_block cfg_bb = bb->cfg_bb ();
       const auto reaching_out
-	= m_vector_manager->vector_block_infos[cfg_bb->index].reaching_out;
+	= get_block_info(cfg_bb).reaching_out;
       if (!reaching_out.dirty_p ())
 	continue;
 
@@ -2854,7 +3991,8 @@ pass_vsetvl::commit_vsetvls (void)
 	  bool available_p = false;
 	  EXECUTE_IF_SET_IN_BITMAP (avin, 0, bb_index, sbi)
 	  {
-	    if (*m_vector_manager->vector_exprs[bb_index] >= reaching_out)
+	    if (m_vector_manager->vector_exprs[bb_index]->available_p (
+		  reaching_out))
 	      {
 		available_p = true;
 		break;
@@ -2865,12 +4003,18 @@ pass_vsetvl::commit_vsetvls (void)
 	}
 
       rtx new_pat;
-      if (can_refine_vsetvl_p (cfg_bb, reaching_out.get_ratio ()))
+      if (!reaching_out.demand_p (DEMAND_AVL))
+	{
+	  vl_vtype_info new_info = reaching_out;
+	  new_info.set_avl_info (avl_info (const0_rtx, nullptr));
+	  new_pat = gen_vsetvl_pat (VSETVL_DISCARD_RESULT, new_info, NULL_RTX);
+	}
+      else if (can_refine_vsetvl_p (cfg_bb, reaching_out))
 	new_pat
 	  = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY, reaching_out, NULL_RTX);
       else if (vlmax_avl_p (reaching_out.get_avl ()))
 	new_pat = gen_vsetvl_pat (VSETVL_NORMAL, reaching_out,
-				  get_vl (reaching_out.get_insn ()->rtl ()));
+				  reaching_out.get_avl_reg_rtx ());
       else
 	new_pat
 	  = gen_vsetvl_pat (VSETVL_DISCARD_RESULT, reaching_out, NULL_RTX);
@@ -2919,15 +4063,216 @@ pass_vsetvl::pre_vsetvl (void)
     commit_edge_insertions ();
 }
 
+/* Some instruction can not be accessed in RTL_SSA when we don't re-init
+   the new RTL_SSA framework but it is definetely at the END of the block.
+
+  Here we optimize the VSETVL is hoisted by LCM:
+
+   Before LCM:
+     bb 1:
+       vsetvli a5,a2,e32,m1,ta,mu
+     bb 2:
+       vsetvli zero,a5,e32,m1,ta,mu
+       ...
+
+   After LCM:
+     bb 1:
+       vsetvli a5,a2,e32,m1,ta,mu
+       LCM INSERTED: vsetvli zero,a5,e32,m1,ta,mu --> eliminate
+     bb 2:
+       ...
+   */
+rtx_insn *
+pass_vsetvl::get_vsetvl_at_end (const bb_info *bb, vector_insn_info *dem) const
+{
+  rtx_insn *end_vsetvl = BB_END (bb->cfg_bb ());
+  if (end_vsetvl && NONDEBUG_INSN_P (end_vsetvl))
+    {
+      if (JUMP_P (end_vsetvl))
+	end_vsetvl = PREV_INSN (end_vsetvl);
+
+      if (NONDEBUG_INSN_P (end_vsetvl)
+	  && vsetvl_discard_result_insn_p (end_vsetvl))
+	{
+	  /* Only handle single succ. here, multiple succ. is much
+	     more complicated.  */
+	  if (single_succ_p (bb->cfg_bb ()))
+	    {
+	      edge e = single_succ_edge (bb->cfg_bb ());
+	      *dem = get_block_info (e->dest).local_dem;
+	      return end_vsetvl;
+	    }
+	}
+    }
+  return nullptr;
+}
+
+/* This predicator should only used within same basic block.  */
+static bool
+local_avl_compatible_p (rtx avl1, rtx avl2)
+{
+  if (!REG_P (avl1) || !REG_P (avl2))
+    return false;
+
+  return REGNO (avl1) == REGNO (avl2);
+}
+
+/* Local user vsetvl optimizaiton:
+
+     Case 1:
+       vsetvl a5,a4,e8,mf8
+       ...
+       vsetvl zero,a5,e8,mf8 --> Eliminate directly.
+
+     Case 2:
+       vsetvl a5,a4,e8,mf8    --> vsetvl a5,a4,e32,mf2
+       ...
+       vsetvl zero,a5,e32,mf2 --> Eliminate directly.  */
+void
+pass_vsetvl::local_eliminate_vsetvl_insn (const bb_info *bb) const
+{
+  rtx_insn *prev_vsetvl = nullptr;
+  rtx_insn *curr_vsetvl = nullptr;
+  rtx vl_placeholder = RVV_VLMAX;
+  rtx prev_avl = vl_placeholder;
+  rtx curr_avl = vl_placeholder;
+  vector_insn_info prev_dem;
+
+  /* Instruction inserted by LCM is not appeared in RTL-SSA yet, try to
+     found those instruciton.   */
+  if (rtx_insn *end_vsetvl = get_vsetvl_at_end (bb, &prev_dem))
+    {
+      prev_avl = get_avl (end_vsetvl);
+      prev_vsetvl = end_vsetvl;
+    }
+
+  bool skip_one = false;
+  /* Backward propgate vsetvl info, drop the later one (prev_vsetvl) if it's
+     compatible with current vsetvl (curr_avl), and merge the vtype and avl
+     info. into current vsetvl.  */
+  for (insn_info *insn : bb->reverse_real_nondebug_insns ())
+    {
+      rtx_insn *rinsn = insn->rtl ();
+      const auto &curr_dem = get_vector_info (insn);
+      bool need_invalidate = false;
+
+      /* Skip if this insn already handled in last iteration.  */
+      if (skip_one)
+	{
+	  skip_one = false;
+	  continue;
+	}
+
+      if (vsetvl_insn_p (rinsn))
+	{
+	  curr_vsetvl = rinsn;
+	  /* vsetvl are using vl rather than avl since it will try to merge
+	     with other vsetvl_discard_result.
+
+			v--- avl
+	     vsetvl a5,a4,e8,mf8   # vsetvl
+	     ...    ^--- vl
+	     vsetvl zero,a5,e8,mf8 # vsetvl_discard_result
+			 ^--- avl
+	     */
+	  curr_avl = get_vl (rinsn);
+	  /* vsetvl is a cut point of local backward vsetvl elimination.  */
+	  need_invalidate = true;
+	}
+      else if (has_vtype_op (rinsn) && NONDEBUG_INSN_P (PREV_INSN (rinsn))
+	       && (vsetvl_discard_result_insn_p (PREV_INSN (rinsn))
+		   || vsetvl_insn_p (PREV_INSN (rinsn))))
+	{
+	  curr_vsetvl = PREV_INSN (rinsn);
+
+	  if (vsetvl_insn_p (PREV_INSN (rinsn)))
+	    {
+	      /* Need invalidate and skip if it's vsetvl.  */
+	      need_invalidate = true;
+	      /* vsetvl_discard_result_insn_p won't appeared in RTL-SSA,
+	       * so only need to skip for vsetvl.  */
+	      skip_one = true;
+	    }
+
+	  curr_avl = get_avl (rinsn);
+
+	  /* Some instrucion like pred_extract_first<mode> don't reqruie avl, so
+	     the avl is null, use vl_placeholder for unify the handling
+	     logic. */
+	  if (!curr_avl)
+	    curr_avl = vl_placeholder;
+	}
+      else if (insn->is_call () || insn->is_asm ()
+	       || find_access (insn->defs (), VL_REGNUM)
+	       || find_access (insn->defs (), VTYPE_REGNUM)
+	       || (REG_P (prev_avl)
+		   && find_access (insn->defs (), REGNO (prev_avl))))
+	{
+	  /* Invalidate if this insn can't propagate vl, vtype or avl.  */
+	  need_invalidate = true;
+	  prev_dem = vector_insn_info ();
+	}
+      else
+	/* Not interested instruction.  */
+	continue;
+
+      /* Local AVL compatibility checking is simpler than global, we only
+	 need to check the REGNO is same.  */
+      if (prev_dem.valid_p () && prev_dem.skip_avl_compatible_p (curr_dem)
+	  && local_avl_compatible_p (prev_avl, curr_avl))
+	{
+	  /* curr_dem and prev_dem is compatible!  */
+	  /* Update avl info since we need to make sure they are fully
+	     compatible before merge.  */
+	  prev_dem.set_avl_info (curr_dem.get_avl_info ());
+	  /* Merge both and update into curr_vsetvl.  */
+	  prev_dem = curr_dem.merge (prev_dem, LOCAL_MERGE);
+	  change_vsetvl_insn (curr_dem.get_insn (), prev_dem);
+	  /* Then we can drop prev_vsetvl.  */
+	  eliminate_insn (prev_vsetvl);
+	}
+
+      if (need_invalidate)
+	{
+	  prev_vsetvl = nullptr;
+	  curr_vsetvl = nullptr;
+	  prev_avl = vl_placeholder;
+	  curr_avl = vl_placeholder;
+	  prev_dem = vector_insn_info ();
+	}
+      else
+	{
+	  prev_vsetvl = curr_vsetvl;
+	  prev_avl = curr_avl;
+	  prev_dem = curr_dem;
+	}
+    }
+}
+
+/* Before VSETVL PASS, RVV instructions pattern is depending on AVL operand
+   implicitly. Since we will emit VSETVL instruction and make RVV instructions
+   depending on VL/VTYPE global status registers, we remove the such AVL operand
+   in the RVV instructions pattern here in order to remove AVL dependencies when
+   AVL operand is a register operand.
+
+   Before the VSETVL PASS:
+     li a5,32
+     ...
+     vadd.vv (..., a5)
+   After the VSETVL PASS:
+     li a5,32
+     vsetvli zero, a5, ...
+     ...
+     vadd.vv (..., const_int 0).  */
 void
 pass_vsetvl::cleanup_insns (void) const
 {
   for (const bb_info *bb : crtl->ssa->bbs ())
     {
+      local_eliminate_vsetvl_insn (bb);
       for (insn_info *insn : bb->real_nondebug_insns ())
 	{
 	  rtx_insn *rinsn = insn->rtl ();
-
 	  if (vlmax_avl_insn_p (rinsn))
 	    {
 	      eliminate_insn (rinsn);
@@ -2938,7 +4283,7 @@ pass_vsetvl::cleanup_insns (void) const
 	  if (!has_vl_op (rinsn) || !REG_P (get_vl (rinsn)))
 	    continue;
 	  rtx avl = get_vl (rinsn);
-	  if (count_occurrences (PATTERN (rinsn), avl, true) == 1)
+	  if (count_regno_occurrences (rinsn, REGNO (avl)) == 1)
 	    {
 	      /* Get the list of uses for the new instruction.  */
 	      auto attempt = crtl->ssa->new_change_attempt ();
@@ -2952,11 +4297,154 @@ pass_vsetvl::cleanup_insns (void) const
 	      use_array new_uses = use_array (uses_builder.finish ());
 	      change.new_uses = new_uses;
 	      change.move_range = insn->ebb ()->insn_range ();
-	      rtx pat = simplify_replace_rtx (PATTERN (rinsn), avl, const0_rtx);
-	      gcc_assert (change_insn (crtl->ssa, change, insn, pat));
+	      rtx pat;
+	      if (fault_first_load_p (rinsn))
+		pat = simplify_replace_rtx (PATTERN (rinsn), avl, const0_rtx);
+	      else
+		{
+		  rtx set = single_set (rinsn);
+		  rtx src
+		    = simplify_replace_rtx (SET_SRC (set), avl, const0_rtx);
+		  pat = gen_rtx_SET (SET_DEST (set), src);
+		}
+	      bool ok = change_insn (crtl->ssa, change, insn, pat);
+	      gcc_assert (ok);
 	    }
 	}
     }
+}
+
+void
+pass_vsetvl::propagate_avl (void) const
+{
+  /* Rebuild the RTL_SSA according to the new CFG generated by LCM.  */
+  /* Finalization of RTL_SSA.  */
+  free_dominance_info (CDI_DOMINATORS);
+  if (crtl->ssa->perform_pending_updates ())
+    cleanup_cfg (0);
+  delete crtl->ssa;
+  crtl->ssa = nullptr;
+  /* Initialization of RTL_SSA.  */
+  calculate_dominance_info (CDI_DOMINATORS);
+  df_analyze ();
+  crtl->ssa = new function_info (cfun);
+
+  hash_set<rtx_insn *> to_delete;
+  for (const bb_info *bb : crtl->ssa->bbs ())
+    {
+      for (insn_info *insn : bb->real_nondebug_insns ())
+	{
+	  if (vsetvl_discard_result_insn_p (insn->rtl ()))
+	    {
+	      rtx avl = get_avl (insn->rtl ());
+	      if (!REG_P (avl))
+		continue;
+
+	      set_info *set = find_access (insn->uses (), REGNO (avl))->def ();
+	      insn_info *def_insn = extract_single_source (set);
+	      if (!def_insn)
+		continue;
+
+	      /* Handle this case:
+		 vsetvli	a6,zero,e32,m1,ta,mu
+		 li	a5,4096
+		 add	a7,a0,a5
+		 addi	a7,a7,-96
+		 vsetvli	t1,zero,e8,mf8,ta,ma
+		 vle8.v	v24,0(a7)
+		 add	a5,a3,a5
+		 addi	a5,a5,-96
+		 vse8.v	v24,0(a5)
+		 vsetvli	zero,a6,e32,m1,tu,ma
+	      */
+	      if (vsetvl_insn_p (def_insn->rtl ()))
+		{
+		  vl_vtype_info def_info = get_vl_vtype_info (def_insn);
+		  vl_vtype_info info = get_vl_vtype_info (insn);
+		  rtx avl = get_avl (def_insn->rtl ());
+		  rtx vl = get_vl (def_insn->rtl ());
+		  if (def_info.get_ratio () == info.get_ratio ())
+		    {
+		      if (vlmax_avl_p (def_info.get_avl ()))
+			{
+			  info.set_avl_info (
+			    avl_info (def_info.get_avl (), nullptr));
+			  rtx new_pat
+			    = gen_vsetvl_pat (VSETVL_NORMAL, info, vl);
+			  validate_change (insn->rtl (),
+					   &PATTERN (insn->rtl ()), new_pat,
+					   false);
+			  continue;
+			}
+		      if (def_info.has_avl_imm () || rtx_equal_p (avl, vl))
+			{
+			  info.set_avl_info (avl_info (avl, nullptr));
+			  emit_vsetvl_insn (VSETVL_DISCARD_RESULT, EMIT_AFTER,
+					    info, NULL_RTX, insn->rtl ());
+			  if (set->single_nondebug_insn_use ())
+			    {
+			      to_delete.add (insn->rtl ());
+			      to_delete.add (def_insn->rtl ());
+			    }
+			  continue;
+			}
+		    }
+		}
+	    }
+
+	  /* Change vsetvl rd, rs1 --> vsevl zero, rs1,
+	     if rd is not used by any nondebug instructions.
+	     Even though this PASS runs after RA and it doesn't help for
+	     reduce register pressure, it can help instructions scheduling
+	     since we remove the dependencies.  */
+	  if (vsetvl_insn_p (insn->rtl ()))
+	    {
+	      rtx vl = get_vl (insn->rtl ());
+	      rtx avl = get_avl (insn->rtl ());
+	      def_info *def = find_access (insn->defs (), REGNO (vl));
+	      set_info *set = safe_dyn_cast<set_info *> (def);
+	      vector_insn_info info;
+	      info.parse_insn (insn);
+	      gcc_assert (set);
+	      if (m_vector_manager->to_delete_vsetvls.contains (insn->rtl ()))
+		{
+		  m_vector_manager->to_delete_vsetvls.remove (insn->rtl ());
+		  if (m_vector_manager->to_refine_vsetvls.contains (
+			insn->rtl ()))
+		    m_vector_manager->to_refine_vsetvls.remove (insn->rtl ());
+		  if (!set->has_nondebug_insn_uses ())
+		    {
+		      to_delete.add (insn->rtl ());
+		      continue;
+		    }
+		}
+	      if (m_vector_manager->to_refine_vsetvls.contains (insn->rtl ()))
+		{
+		  m_vector_manager->to_refine_vsetvls.remove (insn->rtl ());
+		  if (!set->has_nondebug_insn_uses ())
+		    {
+		      rtx new_pat = gen_vsetvl_pat (VSETVL_VTYPE_CHANGE_ONLY,
+						    info, NULL_RTX);
+		      change_insn (insn->rtl (), new_pat);
+		      continue;
+		    }
+		}
+	      if (vlmax_avl_p (avl))
+		continue;
+	      rtx new_pat
+		= gen_vsetvl_pat (VSETVL_DISCARD_RESULT, info, NULL_RTX);
+	      if (!set->has_nondebug_insn_uses ())
+		{
+		  validate_change (insn->rtl (), &PATTERN (insn->rtl ()),
+				   new_pat, false);
+		  continue;
+		}
+	    }
+	}
+    }
+
+  for (rtx_insn *rinsn : to_delete)
+    eliminate_insn (rinsn);
 }
 
 void
@@ -3011,14 +4499,21 @@ pass_vsetvl::compute_probabilities (void)
     {
       basic_block cfg_bb = bb->cfg_bb ();
       auto &curr_prob
-	= m_vector_manager->vector_block_infos[cfg_bb->index].probability;
+	= get_block_info(cfg_bb).probability;
+
+      /* GCC assume entry block (bb 0) are always so
+	 executed so set its probability as "always".  */
       if (ENTRY_BLOCK_PTR_FOR_FN (cfun) == cfg_bb)
 	curr_prob = profile_probability::always ();
+      /* Exit block (bb 1) is the block we don't need to process.  */
+      if (EXIT_BLOCK_PTR_FOR_FN (cfun) == cfg_bb)
+	continue;
+
       gcc_assert (curr_prob.initialized_p ());
       FOR_EACH_EDGE (e, ei, cfg_bb->succs)
 	{
 	  auto &new_prob
-	    = m_vector_manager->vector_block_infos[e->dest->index].probability;
+	    = get_block_info(e->dest).probability;
 	  if (!new_prob.initialized_p ())
 	    new_prob = curr_prob * e->probability;
 	  else if (new_prob == profile_probability::always ())
@@ -3027,9 +4522,6 @@ pass_vsetvl::compute_probabilities (void)
 	    new_prob += curr_prob * e->probability;
 	}
     }
-  auto &exit_block
-    = m_vector_manager->vector_block_infos[EXIT_BLOCK_PTR_FOR_FN (cfun)->index];
-  exit_block.probability = profile_probability::always ();
 }
 
 /* Lazy vsetvl insertion for optimize > 0. */
@@ -3077,6 +4569,12 @@ pass_vsetvl::lazy_vsetvl (void)
   if (dump_file)
     fprintf (dump_file, "\nPhase 5: Cleanup AVL and VL operands\n");
   cleanup_insns ();
+
+  /* Phase 6 - Rebuild RTL_SSA to propagate AVL between vsetvls.  */
+  if (dump_file)
+    fprintf (dump_file,
+	     "\nPhase 6: Rebuild RTL_SSA to propagate AVL between vsetvls\n");
+  propagate_avl ();
 }
 
 /* Main entry point for this pass.  */
@@ -3086,12 +4584,10 @@ pass_vsetvl::execute (function *)
   if (n_basic_blocks_for_fn (cfun) <= 0)
     return 0;
 
-  /* The reason we have this since we didn't finish splitting yet
-     when optimize == 0. In this case, we should conservatively
-     split all instructions here to make sure we don't miss any
-     RVV instruction.  */
-  if (!optimize)
-    split_all_insns ();
+  /* The RVV instruction may change after split which is not a stable
+     instruction. We need to split it here to avoid potential issue
+     since the VSETVL PASS is insert before split PASS.  */
+  split_all_insns ();
 
   /* Early return for there is no vector instructions.  */
   if (!has_vector_insn (cfun))

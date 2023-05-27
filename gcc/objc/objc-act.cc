@@ -117,7 +117,6 @@ static tree build_method_decl (enum tree_code, tree, tree, tree, bool);
 static tree objc_add_method (tree, tree, int, bool);
 static tree add_instance_variable (tree, objc_ivar_visibility_kind, tree);
 static tree build_ivar_reference (tree);
-static tree is_ivar (tree, tree);
 
 /* We only need the following for ObjC; ObjC++ will use C++'s definition
    of DERIVED_FROM_P.  */
@@ -169,7 +168,6 @@ static tree lookup_method_static (tree, tree, int);
 static void interface_hash_init (void);
 static tree add_interface (tree, tree);
 static void add_category (tree, tree);
-static inline tree lookup_category (tree, tree);
 
 /* Protocols.  */
 
@@ -2340,7 +2338,7 @@ objc_volatilize_decl (tree decl)
   /* Do not mess with variables that are 'static' or (already)
      'volatile'.  */
   if (!TREE_THIS_VOLATILE (decl) && !TREE_STATIC (decl)
-      && (TREE_CODE (decl) == VAR_DECL
+      && (VAR_P (decl)
 	  || TREE_CODE (decl) == PARM_DECL))
     {
       if (local_variables_to_volatilize == NULL)
@@ -3795,7 +3793,7 @@ objc_is_ivar_reference_p (tree expr)
 static int
 objc_is_global_reference_p (tree expr)
 {
-  return (TREE_CODE (expr) == INDIRECT_REF || TREE_CODE (expr) == PLUS_EXPR
+  return (INDIRECT_REF_P (expr) || TREE_CODE (expr) == PLUS_EXPR
 	  ? objc_is_global_reference_p (TREE_OPERAND (expr, 0))
 	  : DECL_P (expr)
 	  ? (DECL_FILE_SCOPE_P (expr) || TREE_STATIC (expr))
@@ -3814,7 +3812,7 @@ objc_generate_write_barrier (tree lhs, enum tree_code modifycode, tree rhs)
 
   /* See if we have any lhs casts, and strip them out.  NB: The lvalue casts
      will have been transformed to the form '*(type *)&expr'.  */
-  if (TREE_CODE (lhs) == INDIRECT_REF)
+  if (INDIRECT_REF_P (lhs))
     {
       outer = TREE_OPERAND (lhs, 0);
 
@@ -3866,7 +3864,7 @@ objc_generate_write_barrier (tree lhs, enum tree_code modifycode, tree rhs)
 	     || TREE_CODE (outer) == ARRAY_REF))
     outer = TREE_OPERAND (outer, 0);
 
-  if (TREE_CODE (outer) == INDIRECT_REF)
+  if (INDIRECT_REF_P (outer))
     {
       outer = TREE_OPERAND (outer, 0);
       indirect_p = 1;
@@ -9696,7 +9694,7 @@ objc_gimplify_property_ref (tree *expr_p)
   if (TREE_CODE (getter) == TARGET_EXPR)
     {
       gcc_assert (MAYBE_CLASS_TYPE_P (TREE_TYPE (getter)));
-      gcc_assert (TREE_CODE (TREE_OPERAND (getter, 0)) == VAR_DECL);
+      gcc_assert (VAR_P (TREE_OPERAND (getter, 0)));
       call_exp = TREE_OPERAND (getter, 1);
     }
 #endif

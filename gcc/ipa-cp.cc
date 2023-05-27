@@ -128,6 +128,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "attribs.h"
 #include "dbgcnt.h"
 #include "symtab-clones.h"
+#include "gimple-range.h"
 
 template <typename valtype> class ipcp_value;
 
@@ -1039,9 +1040,16 @@ ipcp_vr_lattice::meet_with_1 (const value_range *other_vr)
   if (other_vr->varying_p ())
     return set_to_bottom ();
 
-  value_range save (m_vr);
-  m_vr.union_ (*other_vr);
-  return m_vr != save;
+  bool res;
+  if (flag_checking)
+    {
+      value_range save (m_vr);
+      res = m_vr.union_ (*other_vr);
+      gcc_assert (res == (m_vr != save));
+    }
+  else
+    res = m_vr.union_ (*other_vr);
+  return res;
 }
 
 /* Return true if value range information in the lattice is yet unknown.  */
@@ -1900,13 +1908,18 @@ ipa_vr_operation_and_type_effects (value_range *dst_vr,
 				   enum tree_code operation,
 				   tree dst_type, tree src_type)
 {
-  range_fold_unary_expr (dst_vr, operation, dst_type, src_vr, src_type);
-  if (dst_vr->varying_p () || dst_vr->undefined_p ())
+  if (!irange::supports_p (dst_type) || !irange::supports_p (src_type))
     return false;
-  return true;
+
+  range_op_handler handler (operation, dst_type);
+  return (handler
+	  && handler.fold_range (*dst_vr, dst_type,
+				 *src_vr, value_range (dst_type))
+	  && !dst_vr->varying_p ()
+	  && !dst_vr->undefined_p ());
 }
 
-/* Determine value_range of JFUNC given that INFO describes the caller node or
+/* Determine range of JFUNC given that INFO describes the caller node or
    the one it is inlined to, CS is the call graph edge corresponding to JFUNC
    and PARM_TYPE of the parameter.  */
 
@@ -1934,12 +1947,11 @@ ipa_value_range_from_jfunc (ipa_node_params *info, cgraph_edge *cs,
 
       idx = ipa_get_jf_pass_through_formal_id (jfunc);
 
-      if (!(*sum->m_vr)[idx].known)
+      if (!(*sum->m_vr)[idx].known_p ())
 	return vr;
       tree vr_type = ipa_get_type (info, idx);
-      value_range srcvr (wide_int_to_tree (vr_type, (*sum->m_vr)[idx].min),
-			 wide_int_to_tree (vr_type, (*sum->m_vr)[idx].max),
-			 (*sum->m_vr)[idx].type);
+      value_range srcvr;
+      (*sum->m_vr)[idx].get_vrange (srcvr);
 
       enum tree_code operation = ipa_get_jf_pass_through_operation (jfunc);
 
@@ -1957,9 +1969,16 @@ ipa_value_range_from_jfunc (ipa_node_params *info, cgraph_edge *cs,
 	{
 	  value_range op_res, res;
 	  tree op = ipa_get_jf_pass_through_operand (jfunc);
-	  value_range op_vr (op, op);
+	  value_range op_vr;
+	  range_op_handler handler (operation, vr_type);
 
-	  range_fold_binary_expr (&op_res, operation, vr_type, &srcvr, &op_vr);
+	  ipa_range_set_and_normalize (op_vr, op);
+
+	  if (!handler
+	      || !op_res.supports_type_p (vr_type)
+	      || !handler.fold_range (op_res, vr_type, srcvr, op_vr))
+	    op_res.set_varying (vr_type);
+
 	  if (ipa_vr_operation_and_type_effects (&res,
 						 &op_res,
 						 NOP_EXPR, parm_type,
@@ -1982,7 +2001,9 @@ ipa_agg_value_from_jfunc (ipa_node_params *info, cgraph_node *node,
   tree value = NULL_TREE;
   int src_idx;
 
-  if (item->offset < 0 || item->jftype == IPA_JF_UNKNOWN)
+  if (item->offset < 0
+      || item->jftype == IPA_JF_UNKNOWN
+      || item->offset >= (HOST_WIDE_INT) UINT_MAX * BITS_PER_UNIT)
     return NULL_TREE;
 
   if (item->jftype == IPA_JF_CONST)
@@ -2744,11 +2765,18 @@ propagate_vr_across_jump_function (cgraph_edge *cs, ipa_jump_func *jfunc,
       else if (!ipa_edge_within_scc (cs))
 	{
 	  tree op = ipa_get_jf_pass_through_operand (jfunc);
-	  value_range op_vr (op, op);
+	  value_range op_vr;
 	  value_range op_res,res;
+	  range_op_handler handler (operation, operand_type);
 
-	  range_fold_binary_expr (&op_res, operation, operand_type,
-				  &src_lats->m_value_range.m_vr, &op_vr);
+	  ipa_range_set_and_normalize (op_vr, op);
+
+	  if (!handler
+	      || !op_res.supports_type_p (operand_type)
+	      || !handler.fold_range (op_res, operand_type,
+				      src_lats->m_value_range.m_vr, op_vr))
+	    op_res.set_varying (operand_type);
+
 	  ipa_vr_operation_and_type_effects (&vr,
 					     &op_res,
 					     NOP_EXPR, param_type,
@@ -2777,7 +2805,8 @@ propagate_vr_across_jump_function (cgraph_edge *cs, ipa_jump_func *jfunc,
 	  if (TREE_OVERFLOW_P (val))
 	    val = drop_tree_overflow (val);
 
-	  value_range tmpvr (val, val);
+	  value_range tmpvr (TREE_TYPE (val),
+			     wi::to_wide (val), wi::to_wide (val));
 	  return dest_lat->meet_with (&tmpvr);
 	}
     }
@@ -4346,7 +4375,8 @@ ipcp_discover_new_direct_edges (struct cgraph_node *node,
 		    fprintf (dump_file, "     controlled uses count of param "
 			     "%i bumped down to %i\n", param_index, c);
 		  if (c == 0
-		      && (to_del = node->find_reference (cs->callee, NULL, 0)))
+		      && (to_del = node->find_reference (cs->callee, NULL, 0,
+							 IPA_REF_ADDR)))
 		    {
 		      if (dump_file && (dump_flags & TDF_DETAILS))
 			fprintf (dump_file, "       and even removing its "
@@ -4967,10 +4997,20 @@ update_profiling_info (struct cgraph_node *orig_node,
 					      false);
   new_sum = stats.count_sum;
 
+  bool orig_edges_processed = false;
   if (new_sum > orig_node_count)
     {
-      /* TODO: Perhaps this should be gcc_unreachable ()?  */
-      remainder = profile_count::zero ().guessed_local ();
+      /* TODO: Profile has alreay gone astray, keep what we have but lower it
+	 to global0 category.  */
+      remainder = orig_node->count.global0 ();
+
+      for (cgraph_edge *cs = orig_node->callees; cs; cs = cs->next_callee)
+	cs->count = cs->count.global0 ();
+      for (cgraph_edge *cs = orig_node->indirect_calls;
+	   cs;
+	   cs = cs->next_callee)
+	cs->count = cs->count.global0 ();
+      orig_edges_processed = true;
     }
   else if (stats.rec_count_sum.nonzero_p ())
     {
@@ -5068,11 +5108,16 @@ update_profiling_info (struct cgraph_node *orig_node,
   for (cgraph_edge *cs = new_node->indirect_calls; cs; cs = cs->next_callee)
     cs->count = cs->count.apply_scale (new_sum, orig_new_node_count);
 
-  profile_count::adjust_for_ipa_scaling (&remainder, &orig_node_count);
-  for (cgraph_edge *cs = orig_node->callees; cs; cs = cs->next_callee)
-    cs->count = cs->count.apply_scale (remainder, orig_node_count);
-  for (cgraph_edge *cs = orig_node->indirect_calls; cs; cs = cs->next_callee)
-    cs->count = cs->count.apply_scale (remainder, orig_node_count);
+  if (!orig_edges_processed)
+    {
+      profile_count::adjust_for_ipa_scaling (&remainder, &orig_node_count);
+      for (cgraph_edge *cs = orig_node->callees; cs; cs = cs->next_callee)
+	cs->count = cs->count.apply_scale (remainder, orig_node_count);
+      for (cgraph_edge *cs = orig_node->indirect_calls;
+	   cs;
+	   cs = cs->next_callee)
+	cs->count = cs->count.apply_scale (remainder, orig_node_count);
+    }
 
   if (dump_file)
     {
@@ -5091,22 +5136,24 @@ update_specialized_profile (struct cgraph_node *new_node,
 			    profile_count redirected_sum)
 {
   struct cgraph_edge *cs;
-  profile_count new_node_count, orig_node_count = orig_node->count;
+  profile_count new_node_count, orig_node_count = orig_node->count.ipa ();
 
   if (dump_file)
     {
       fprintf (dump_file, "    the sum of counts of redirected  edges is ");
       redirected_sum.dump (dump_file);
+      fprintf (dump_file, "\n    old ipa count of the original node is ");
+      orig_node_count.dump (dump_file);
       fprintf (dump_file, "\n");
     }
   if (!(orig_node_count > profile_count::zero ()))
     return;
 
-  gcc_assert (orig_node_count >= redirected_sum);
-
   new_node_count = new_node->count;
   new_node->count += redirected_sum;
-  orig_node->count -= redirected_sum;
+  orig_node->count
+    = lenient_count_portion_handling (orig_node->count - redirected_sum,
+				      orig_node);
 
   for (cs = new_node->callees; cs; cs = cs->next_callee)
     cs->count += cs->count.apply_scale (redirected_sum, new_node_count);
@@ -5161,10 +5208,12 @@ adjust_references_in_caller (cgraph_edge *cs, symtab_node *symbol, int index)
   if (jfunc->type == IPA_JF_CONST)
     {
       ipa_ref *to_del = cs->caller->find_reference (symbol, cs->call_stmt,
-						    cs->lto_stmt_uid);
+						    cs->lto_stmt_uid,
+						    IPA_REF_ADDR);
       if (!to_del)
 	return;
       to_del->remove_reference ();
+      ipa_zap_jf_refdesc (jfunc);
       if (dump_file)
 	fprintf (dump_file, "    Removed a reference from %s to %s.\n",
 		 cs->caller->dump_name (), symbol->dump_name ());
@@ -5172,7 +5221,8 @@ adjust_references_in_caller (cgraph_edge *cs, symtab_node *symbol, int index)
     }
 
   if (jfunc->type != IPA_JF_PASS_THROUGH
-      || ipa_get_jf_pass_through_operation (jfunc) != NOP_EXPR)
+      || ipa_get_jf_pass_through_operation (jfunc) != NOP_EXPR
+      || ipa_get_jf_pass_through_refdesc_decremented (jfunc))
     return;
 
   int fidx = ipa_get_jf_pass_through_formal_id (jfunc);
@@ -5199,6 +5249,10 @@ adjust_references_in_caller (cgraph_edge *cs, symtab_node *symbol, int index)
   gcc_assert (cuses > 0);
   cuses--;
   ipa_set_controlled_uses (caller_info, fidx, cuses);
+  ipa_set_jf_pass_through_refdesc_decremented (jfunc, true);
+  if (dump_file && (dump_flags & TDF_DETAILS))
+    fprintf (dump_file, "    Controlled uses of parameter %i of %s dropped "
+	     "to %i.\n", fidx, caller->dump_name (), cuses);
   if (cuses)
     return;
 
@@ -5206,8 +5260,8 @@ adjust_references_in_caller (cgraph_edge *cs, symtab_node *symbol, int index)
     {
       /* Cloning machinery has created a reference here, we need to either
 	 remove it or change it to a read one.  */
-      ipa_ref *to_del = caller->find_reference (symbol, NULL, 0);
-      if (to_del && to_del->use == IPA_REF_ADDR)
+      ipa_ref *to_del = caller->find_reference (symbol, NULL, 0, IPA_REF_ADDR);
+      if (to_del)
 	{
 	  to_del->remove_reference ();
 	  if (dump_file)
@@ -6153,6 +6207,23 @@ decide_about_value (struct cgraph_node *node, int index, HOST_WIDE_INT offset,
   return true;
 }
 
+/* Like irange::contains_p(), but convert VAL to the range of R if
+   necessary.  */
+
+static inline bool
+ipa_range_contains_p (const vrange &r, tree val)
+{
+  if (r.undefined_p ())
+    return false;
+
+  tree type = r.type ();
+  if (!wi::fits_to_tree_p (wi::to_wide (val), type))
+    return false;
+
+  val = fold_convert (type, val);
+  return r.contains_p (val);
+}
+
 /* Decide whether and what specialized clones of NODE should be created.  */
 
 static bool
@@ -6194,7 +6265,8 @@ decide_whether_version_node (struct cgraph_node *node)
 		 supports this only for integers now.  */
 	      if (TREE_CODE (val->value) == INTEGER_CST
 		  && !plats->m_value_range.bottom_p ()
-		  && !plats->m_value_range.m_vr.contains_p (val->value))
+		  && !ipa_range_contains_p (plats->m_value_range.m_vr,
+					    val->value))
 		{
 		  /* This can happen also if a constant present in the source
 		     code falls outside of the range of parameter's type, so we
@@ -6547,24 +6619,19 @@ ipcp_store_vr_results (void)
       for (unsigned i = 0; i < count; i++)
 	{
 	  ipcp_param_lattices *plats = ipa_get_parm_lattices (info, i);
-	  ipa_vr vr;
 
 	  if (!plats->m_value_range.bottom_p ()
 	      && !plats->m_value_range.top_p ()
 	      && dbg_cnt (ipa_cp_vr))
 	    {
-	      vr.known = true;
-	      vr.type = plats->m_value_range.m_vr.kind ();
-	      vr.min = wi::to_wide (plats->m_value_range.m_vr.min ());
-	      vr.max = wi::to_wide (plats->m_value_range.m_vr.max ());
+	      ipa_vr vr (plats->m_value_range.m_vr);
+	      ts->m_vr->quick_push (vr);
 	    }
 	  else
 	    {
-	      vr.known = false;
-	      vr.type = VR_VARYING;
-	      vr.min = vr.max = wi::zero (INT_TYPE_SIZE);
+	      ipa_vr vr;
+	      ts->m_vr->quick_push (vr);
 	    }
-	  ts->m_vr->quick_push (vr);
 	}
     }
 }

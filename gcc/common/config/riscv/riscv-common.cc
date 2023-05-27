@@ -104,7 +104,7 @@ static const riscv_implied_info_t riscv_implied_info[] =
 
   {"zfh", "zfhmin"},
   {"zfhmin", "f"},
-  
+
   {"zhinx", "zhinxmin"},
   {"zhinxmin", "zfinx"},
 
@@ -221,6 +221,19 @@ static const struct riscv_ext_version riscv_ext_version_table[] =
 
   {"svinval", ISA_SPEC_CLASS_NONE, 1, 0},
   {"svnapot", ISA_SPEC_CLASS_NONE, 1, 0},
+
+  {"xtheadba", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadbb", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadbs", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadcmo", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadcondmov", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadfmemidx", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadfmv", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadint", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadmac", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadmemidx", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadmempair", ISA_SPEC_CLASS_NONE, 1, 0},
+  {"xtheadsync", ISA_SPEC_CLASS_NONE, 1, 0},
 
   /* Terminate the list.  */
   {NULL, ISA_SPEC_CLASS_NONE, 0, 0}
@@ -385,10 +398,10 @@ multi_letter_subset_rank (const std::string &subset)
   char multiletter_class = subset[0];
   switch (multiletter_class)
     {
-    case 's':
+    case 'z':
       high_order = 0;
       break;
-    case 'z':
+    case 's':
       high_order = 1;
       break;
     case 'x':
@@ -1108,14 +1121,14 @@ riscv_subset_list::parse (const char *arch, location_t loc)
   if (p == NULL)
     goto fail;
 
-  /* Parsing supervisor extension.  */
-  p = subset_list->parse_multiletter_ext (p, "s", "supervisor extension");
+  /* Parsing sub-extensions.  */
+  p = subset_list->parse_multiletter_ext (p, "z", "sub-extension");
 
   if (p == NULL)
     goto fail;
 
-  /* Parsing sub-extensions.  */
-  p = subset_list->parse_multiletter_ext (p, "z", "sub-extension");
+  /* Parsing supervisor extension.  */
+  p = subset_list->parse_multiletter_ext (p, "s", "supervisor extension");
 
   if (p == NULL)
     goto fail;
@@ -1139,6 +1152,10 @@ riscv_subset_list::parse (const char *arch, location_t loc)
     }
 
   subset_list->handle_combine_ext ();
+
+  if (subset_list->lookup ("zfinx") && subset_list->lookup ("f"))
+    error_at (loc, "%<-march=%s%>: z*inx conflicts with floating-point "
+		   "extensions", arch);
 
   return subset_list;
 
@@ -1177,6 +1194,7 @@ static const riscv_ext_flag_table_t riscv_ext_flag_table[] =
   {"f", &gcc_options::x_target_flags, MASK_HARD_FLOAT},
   {"d", &gcc_options::x_target_flags, MASK_DOUBLE_FLOAT},
   {"c", &gcc_options::x_target_flags, MASK_RVC},
+  {"v", &gcc_options::x_target_flags, MASK_FULL_V},
   {"v", &gcc_options::x_target_flags, MASK_VECTOR},
 
   {"zicsr",    &gcc_options::x_riscv_zi_subext, MASK_ZICSR},
@@ -1246,6 +1264,19 @@ static const riscv_ext_flag_table_t riscv_ext_flag_table[] =
 
   {"svinval", &gcc_options::x_riscv_sv_subext, MASK_SVINVAL},
   {"svnapot", &gcc_options::x_riscv_sv_subext, MASK_SVNAPOT},
+
+  {"xtheadba",      &gcc_options::x_riscv_xthead_subext, MASK_XTHEADBA},
+  {"xtheadbb",      &gcc_options::x_riscv_xthead_subext, MASK_XTHEADBB},
+  {"xtheadbs",      &gcc_options::x_riscv_xthead_subext, MASK_XTHEADBS},
+  {"xtheadcmo",     &gcc_options::x_riscv_xthead_subext, MASK_XTHEADCMO},
+  {"xtheadcondmov", &gcc_options::x_riscv_xthead_subext, MASK_XTHEADCONDMOV},
+  {"xtheadfmemidx", &gcc_options::x_riscv_xthead_subext, MASK_XTHEADFMEMIDX},
+  {"xtheadfmv",     &gcc_options::x_riscv_xthead_subext, MASK_XTHEADFMV},
+  {"xtheadint",     &gcc_options::x_riscv_xthead_subext, MASK_XTHEADINT},
+  {"xtheadmac",     &gcc_options::x_riscv_xthead_subext, MASK_XTHEADMAC},
+  {"xtheadmemidx",  &gcc_options::x_riscv_xthead_subext, MASK_XTHEADMEMIDX},
+  {"xtheadmempair", &gcc_options::x_riscv_xthead_subext, MASK_XTHEADMEMPAIR},
+  {"xtheadsync",    &gcc_options::x_riscv_xthead_subext, MASK_XTHEADSYNC},
 
   {NULL, NULL, 0}
 };
@@ -1410,9 +1441,6 @@ riscv_multi_lib_check (int argc ATTRIBUTE_UNUSED,
   return "";
 }
 
-/* We only override this in bare-metal toolchain.  */
-#ifdef RISCV_USE_CUSTOMISED_MULTI_LIB
-
 /* Find last switch with the prefix, options are take last one in general,
    return NULL if not found, and return the option value if found, it could
    return empty string if the option has no value.  */
@@ -1566,6 +1594,65 @@ riscv_check_conds (
   return match_score + ok_count * 100;
 }
 
+static const char *
+riscv_select_multilib_by_abi (
+  const std::string &riscv_current_abi_str,
+  const std::vector<riscv_multi_lib_info_t> &multilib_infos)
+{
+  for (size_t i = 0; i < multilib_infos.size (); ++i)
+    if (riscv_current_abi_str == multilib_infos[i].abi_str)
+      return xstrdup (multilib_infos[i].path.c_str ());
+
+  return NULL;
+}
+
+static const char *
+riscv_select_multilib (
+  const std::string &riscv_current_abi_str,
+  const riscv_subset_list *subset_list, const struct switchstr *switches,
+  int n_switches, const std::vector<riscv_multi_lib_info_t> &multilib_infos)
+{
+  int match_score = 0;
+  int max_match_score = 0;
+  int best_match_multi_lib = -1;
+  /* Try to decision which set we should used.  */
+  /* We have 3 level decision tree here, ABI, check input arch/ABI must
+     be superset of multi-lib arch, and other rest option checking.  */
+  for (size_t i = 0; i < multilib_infos.size (); ++i)
+    {
+      /* Check ABI is same first.  */
+      if (riscv_current_abi_str != multilib_infos[i].abi_str)
+	continue;
+
+      /* Found a potential compatible multi-lib setting!
+	 Calculate the match score.  */
+      match_score = subset_list->match_score (multilib_infos[i].subset_list);
+
+      /* Checking other cond in the multi-lib setting.  */
+      match_score = riscv_check_conds (switches, n_switches, match_score,
+				       multilib_infos[i].conds);
+
+      /* Record highest match score multi-lib setting.  */
+      if (match_score > max_match_score)
+	{
+	  best_match_multi_lib = i;
+	  max_match_score = match_score;
+	}
+    }
+
+  if (best_match_multi_lib == -1)
+    {
+      riscv_no_matched_multi_lib = true;
+      return NULL;
+    }
+  else
+    return xstrdup (multilib_infos[best_match_multi_lib].path.c_str ());
+}
+
+#ifndef RISCV_USE_CUSTOMISED_MULTI_LIB
+#define RISCV_USE_CUSTOMISED_MULTI_LIB select_by_builtin
+#endif
+
 /* Implement TARGET_COMPUTE_MULTILIB.  */
 static const char *
 riscv_compute_multilib (
@@ -1578,6 +1665,11 @@ riscv_compute_multilib (
   const char *multilib_exclusions ATTRIBUTE_UNUSED,
   const char *multilib_reuse ATTRIBUTE_UNUSED)
 {
+  enum riscv_multilib_select_kind select_kind = RISCV_USE_CUSTOMISED_MULTI_LIB;
+
+  if (select_kind == select_by_builtin)
+    return multilib_dir;
+
   const char *p;
   const char *this_path;
   size_t this_path_len;
@@ -1641,7 +1733,13 @@ riscv_compute_multilib (
 	}
 
       this_path_len = p - this_path;
-      multilib_info.path = std::string (this_path, this_path_len);
+      const char *multi_os_dir_pos
+	= (const char *) memchr (this_path, ':', this_path_len);
+      if (multi_os_dir_pos)
+	multilib_info.path
+	  = std::string (this_path, multi_os_dir_pos - this_path);
+      else
+	multilib_info.path = std::string (this_path, this_path_len);
 
       option_conds.clear ();
       /* Pasrse option check list into vector<string>.
@@ -1676,45 +1774,23 @@ riscv_compute_multilib (
       p++;
     }
 
-  int match_score = 0;
-  int max_match_score = 0;
-  int best_match_multi_lib = -1;
-  /* Try to decision which set we should used.  */
-  /* We have 3 level decision tree here, ABI, check input arch/ABI must
-     be superset of multi-lib arch, and other rest option checking.  */
-  for (size_t i = 0; i < multilib_infos.size (); ++i)
+  switch (select_kind)
     {
-      /* Check ABI is same first.  */
-      if (riscv_current_abi_str != multilib_infos[i].abi_str)
-	continue;
-
-      /* Found a potential compatible multi-lib setting!
-	 Calculate the match score.  */
-      match_score = subset_list->match_score (multilib_infos[i].subset_list);
-
-      /* Checking other cond in the multi-lib setting.  */
-      match_score = riscv_check_conds (switches,
-				       n_switches,
-				       match_score,
-				       multilib_infos[i].conds);
-
-      /* Record highest match score multi-lib setting.  */
-      if (match_score > max_match_score)
-	best_match_multi_lib = i;
+    case select_by_abi:
+      return riscv_select_multilib_by_abi (riscv_current_abi_str,
+					   multilib_infos);
+    case select_by_abi_arch_cmodel:
+      return riscv_select_multilib (riscv_current_abi_str, subset_list,
+				    switches, n_switches, multilib_infos);
+    case select_by_builtin:
+      gcc_unreachable ();
+    default:
+      gcc_unreachable ();
     }
-
-  if (best_match_multi_lib == -1)
-    {
-      riscv_no_matched_multi_lib = true;
-      return multilib_dir;
-    }
-  else
-    return xstrdup (multilib_infos[best_match_multi_lib].path.c_str ());
 }
 
 #undef TARGET_COMPUTE_MULTILIB
 #define TARGET_COMPUTE_MULTILIB riscv_compute_multilib
-#endif
 
 vec<const char *>
 riscv_get_valid_option_values (int option_code,
@@ -1756,6 +1832,10 @@ static const struct default_options riscv_option_optimization_table[] =
   {
     { OPT_LEVELS_1_PLUS, OPT_fsection_anchors, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_free, NULL, 1 },
+#if TARGET_DEFAULT_ASYNC_UNWIND_TABLES == 1
+    { OPT_LEVELS_ALL, OPT_fasynchronous_unwind_tables, NULL, 1 },
+    { OPT_LEVELS_ALL, OPT_funwind_tables, NULL, 1},
+#endif
     { OPT_LEVELS_NONE, 0, NULL, 0 }
   };
 

@@ -3214,9 +3214,9 @@ gfc_find_symtree_in_proc (const char* name, gfc_namespace* ns)
 
 /* Search for a symtree starting in the current namespace, resorting to
    any parent namespaces if requested by a nonzero parent_flag.
-   Returns nonzero if the name is ambiguous.  */
+   Returns true if the name is ambiguous.  */
 
-int
+bool
 gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 		   gfc_symtree **result)
 {
@@ -3238,10 +3238,10 @@ gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 	  if (st->ambiguous && !st->n.sym->attr.generic)
 	    {
 	      ambiguous_symbol (name, st);
-	      return 1;
+	      return true;
 	    }
 
-	  return 0;
+	  return false;
 	}
 
       if (!parent_flag)
@@ -3270,12 +3270,12 @@ gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 	    }
 	}
       *result = st;
-      return 0;
+      return false;
     }
 
   *result = NULL;
 
-  return 0;
+  return false;
 }
 
 
@@ -3761,7 +3761,11 @@ free_old_symbol (gfc_symbol *sym)
   if (sym->old_symbol == NULL)
     return;
 
-  if (sym->old_symbol->as != sym->as)
+  if (sym->old_symbol->as != NULL
+      && sym->old_symbol->as != sym->as
+      && !(sym->ts.type == BT_CLASS
+	   && sym->ts.u.derived->attr.is_class
+	   && sym->old_symbol->as == CLASS_DATA (sym)->as))
     gfc_free_array_spec (sym->old_symbol->as);
 
   if (sym->old_symbol->value != sym->value)

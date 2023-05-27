@@ -1,3 +1,40 @@
+2023-04-30  Martin Liska  <mliska@suse.cz>
+
+	PR sanitizer/109674
+	* hwasan/Makefile.am: Depend on liblsan.
+	* hwasan/Makefile.in: Re-generate.
+
+2023-04-30  Martin Liska  <mliska@suse.cz>
+
+	* LOCAL_PATCHES: Update revision.
+
+2023-04-26  Martin Liska  <mliska@suse.cz>
+
+	* LOCAL_PATCHES: Change revision.
+
+2023-04-18  Iain Sandoe  <iain@sandoe.co.uk>
+
+	* configure.tgt: Unsupport Darwin22+ until a mechanism can be found
+	to locate dyld in the shared cache.
+
+2023-01-31  H.J. Lu  <hjl.tools@gmail.com>
+
+	PR sanitizer/108106
+	* hwasan/hwasan_setjmp_x86_64.S (__interceptor_setjmp): Jump
+	to .Linterceptor_sigsetjmp instead of __interceptor_sigsetjmp.
+	(__interceptor_sigsetjmp): Add a local alias,
+	.Linterceptor_sigsetjmp.
+
+2023-01-31  Martin Liska  <mliska@suse.cz>
+
+	* configure: Regenerate.
+
+2023-01-31  YunQiang Su  <yunqiang.su@cipunited.com>
+
+	* configure.ac: set -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
+	always for mips*.
+	* configure: Regenerate.
+
 2023-01-17  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
 
 	* sanitizer_common/sanitizer_platform_interceptors.h: Cherry-pick

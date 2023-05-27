@@ -105,6 +105,7 @@ rtx const_true_rtx;
 REAL_VALUE_TYPE dconst0;
 REAL_VALUE_TYPE dconst1;
 REAL_VALUE_TYPE dconst2;
+REAL_VALUE_TYPE dconstm0;
 REAL_VALUE_TYPE dconstm1;
 REAL_VALUE_TYPE dconsthalf;
 REAL_VALUE_TYPE dconstinf;
@@ -986,6 +987,10 @@ validate_subreg (machine_mode omode, machine_mode imode,
 
       return subreg_offset_representable_p (regno, imode, offset, omode);
     }
+  /* Do not allow SUBREG with stricter alignment than the inner MEM.  */
+  else if (reg && MEM_P (reg) && STRICT_ALIGNMENT
+	   && MEM_ALIGN (reg) < GET_MODE_ALIGNMENT (omode))
+    return false;
 
   /* The outer size must be ordered wrt the register size, otherwise
      we wouldn't know at compile time how many registers the outer
@@ -6205,6 +6210,9 @@ init_emit_once (void)
   real_from_integer (&dconst0, double_mode, 0, SIGNED);
   real_from_integer (&dconst1, double_mode, 1, SIGNED);
   real_from_integer (&dconst2, double_mode, 2, SIGNED);
+
+  dconstm0 = dconst0;
+  dconstm0.sign = 1;
 
   dconstm1 = dconst1;
   dconstm1.sign = 1;

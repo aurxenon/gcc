@@ -26,6 +26,10 @@
 ;; from the same template.
 (define_mode_iterator GPR [SI (DI "TARGET_64BIT")])
 
+;; A copy of GPR that can be used when a pattern has two independent
+;; modes.
+(define_mode_iterator GPR2 [SI (DI "TARGET_64BIT")])
+
 ;; This mode iterator allows :P to be used for patterns that operate on
 ;; pointer-sized quantities.  Exactly one of the two alternatives will match.
 (define_mode_iterator P [(SI "Pmode == SImode") (DI "Pmode == DImode")])
@@ -113,7 +117,7 @@
 (define_mode_attr HALFMODE [(DF "SI") (DI "SI") (TF "DI")])
 
 ; bitmanip mode attribute
-(define_mode_attr shiftm1 [(SI "const31_operand") (DI "const63_operand")])
+(define_mode_attr shiftm1 [(SI "const_si_mask_operand") (DI "const_di_mask_operand")])
 (define_mode_attr shiftm1p [(SI "DsS") (DI "DsD")])
 
 ;; -------------------------------------------------------------------
@@ -148,6 +152,11 @@
 ;; from the same template.
 (define_code_iterator any_mod [mod umod])
 
+;; These code iterators allow unsigned and signed divmod to be generated
+;; from the same template.
+(define_code_iterator only_div [div udiv])
+(define_code_attr paired_mod [(div "mod") (udiv "umod")])
+
 ;; These code iterators allow the signed and unsigned scc operations to use
 ;; the same template.
 (define_code_iterator any_gt [gt gtu])
@@ -165,6 +174,8 @@
 
 (define_code_iterator clz_ctz_pcnt [clz ctz popcount])
 
+(define_code_iterator bitmanip_rotate [rotate rotatert])
+
 ;; -------------------------------------------------------------------
 ;; Code Attributes
 ;; -------------------------------------------------------------------
@@ -175,7 +186,10 @@
 		     (gt "") (gtu "u")
 		     (ge "") (geu "u")
 		     (lt "") (ltu "u")
-		     (le "") (leu "u")])
+		     (le "") (leu "u")
+		     (fix "") (unsigned_fix "u")
+		     (div "") (udiv "u")
+		     (float "") (unsigned_float "u")])
 
 ;; <su> is like <u>, but the signed form expands to "s" rather than "".
 (define_code_attr su [(sign_extend "s") (zero_extend "u")])
@@ -196,7 +210,22 @@
 			 (xor "xor")
 			 (and "and")
 			 (plus "add")
-			 (minus "sub")])
+			 (minus "sub")
+			 (smin "smin")
+			 (smax "smax")
+			 (umin "umin")
+			 (umax "umax")
+			 (mult "mul")
+			 (not "one_cmpl")
+			 (neg "neg")
+			 (abs "abs")
+			 (sqrt "sqrt")
+			 (ss_plus "ssadd")
+			 (us_plus "usadd")
+			 (ss_minus "sssub")
+			 (us_minus "ussub")
+			 (sign_extend "extend")
+			 (zero_extend "zero_extend")])
 
 ;; <or_optab> code attributes
 (define_code_attr or_optab [(ior "ior")
@@ -214,7 +243,20 @@
 			(xor "xor")
 			(and "and")
 			(plus "add")
-			(minus "sub")])
+			(minus "sub")
+			(smin "min")
+			(smax "max")
+			(umin "minu")
+			(umax "maxu")
+			(mult "mul")
+			(not "not")
+			(neg "neg")
+			(abs "abs")
+			(sqrt "sqrt")
+			(ss_plus "sadd")
+			(us_plus "saddu")
+			(ss_minus "ssub")
+			(us_minus "ssubu")])
 
 ; atomics code attribute
 (define_code_attr atomic_optab
@@ -231,7 +273,9 @@
 				  (umax "umax")
 				  (clz "clz")
 				  (ctz "ctz")
-				  (popcount "popcount")])
+				  (popcount "popcount")
+				  (rotate "rotl")
+				  (rotatert "rotr")])
 (define_code_attr bitmanip_insn [(smin "min")
 				 (smax "max")
 				 (umin "minu")

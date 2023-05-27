@@ -667,7 +667,6 @@ END ReadNBytes ;
 PROCEDURE BufferedRead (f: File; nBytes: CARDINAL; a: ADDRESS) : INTEGER ;
 VAR
    t     : ADDRESS ;
-   result: INTEGER ;
    total,
    n     : INTEGER ;
    p     : POINTER TO BYTE ;
@@ -738,14 +737,11 @@ BEGIN
                   END
                END ;
                RETURN( total )
-            ELSE
-               RETURN( -1 )
             END
          END
       END
-   ELSE
-      RETURN( -1 )
-   END
+   END ;
+   RETURN( -1 )
 END BufferedRead ;
 
 
@@ -1239,7 +1235,6 @@ END WriteNBytes ;
 PROCEDURE BufferedWrite (f: File; nBytes: CARDINAL; a: ADDRESS) : INTEGER ;
 VAR
    t     : ADDRESS ;
-   result: INTEGER ;
    total,
    n     : INTEGER ;
    p     : POINTER TO BYTE ;
@@ -1606,7 +1601,8 @@ BEGIN
       ELSE
          RETURN fd^.name.address
       END
-   END
+   END ;
+   RETURN NIL
 END getFileName ;
 
 
@@ -1628,7 +1624,8 @@ BEGIN
       ELSE
          RETURN fd^.name.size
       END
-   END
+   END ;
+   RETURN 0
 END getFileNameLength ;
 
 

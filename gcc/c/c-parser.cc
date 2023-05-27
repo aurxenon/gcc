@@ -1541,7 +1541,7 @@ static void c_parser_static_assert_declaration_no_semi (c_parser *);
 static void c_parser_static_assert_declaration (c_parser *);
 static struct c_typespec c_parser_enum_specifier (c_parser *);
 static struct c_typespec c_parser_struct_or_union_specifier (c_parser *);
-static tree c_parser_struct_declaration (c_parser *);
+static tree c_parser_struct_declaration (c_parser *, tree *);
 static struct c_typespec c_parser_typeof_specifier (c_parser *);
 static tree c_parser_alignas_specifier (c_parser *);
 static struct c_declarator *c_parser_direct_declarator (c_parser *, bool,
@@ -2263,6 +2263,9 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 	  if (!handled_assume)
 	    pedwarn (here, 0, "empty declaration");
 	}
+      /* We still have to evaluate size expressions.  */
+      if (specs->expr)
+	add_stmt (fold_convert (void_type_node, specs->expr));
       c_parser_consume_token (parser);
       if (oacc_routine_data)
 	c_finish_oacc_routine (oacc_routine_data, NULL_TREE, false);
@@ -2480,18 +2483,7 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 		  int flag_sanitize_save = flag_sanitize;
 		  if (nested && !empty_ok)
 		    flag_sanitize = 0;
-		  if (std_auto_type_p
-		      && c_parser_next_token_is (parser, CPP_OPEN_BRACE))
-		    {
-		      matching_braces braces;
-		      braces.consume_open (parser);
-		      init = c_parser_expr_no_commas (parser, NULL);
-		      if (c_parser_next_token_is (parser, CPP_COMMA))
-			c_parser_consume_token (parser);
-		      braces.skip_until_found_close (parser);
-		    }
-		  else
-		    init = c_parser_expr_no_commas (parser, NULL);
+		  init = c_parser_expr_no_commas (parser, NULL);
 		  if (std_auto_type_p)
 		    finish_underspecified_init (underspec_name,
 						underspec_state);
@@ -2505,8 +2497,7 @@ c_parser_declaration_or_fndef (c_parser *parser, bool fndef_ok,
 		  init = convert_lvalue_to_rvalue (init_loc, init, true, true,
 						   true);
 		  tree init_type = TREE_TYPE (init.value);
-		  bool vm_type = variably_modified_type_p (init_type,
-							   NULL_TREE);
+		  bool vm_type = c_type_variably_modified_p (init_type);
 		  if (vm_type)
 		    init.value = save_expr (init.value);
 		  finish_init ();
@@ -3794,6 +3785,7 @@ c_parser_struct_or_union_specifier (c_parser *parser)
 	 so we'll be minimizing the number of node traversals required
 	 by chainon.  */
       tree contents;
+      tree expr = NULL;
       timevar_push (TV_PARSE_STRUCT);
       contents = NULL_TREE;
       c_parser_consume_token (parser);
@@ -3855,7 +3847,7 @@ c_parser_struct_or_union_specifier (c_parser *parser)
 	    }
 	  /* Parse some comma-separated declarations, but not the
 	     trailing semicolon if any.  */
-	  decls = c_parser_struct_declaration (parser);
+	  decls = c_parser_struct_declaration (parser, &expr);
 	  contents = chainon (decls, contents);
 	  /* If no semicolon follows, either we have a parse error or
 	     are at the end of the struct or union and should
@@ -3886,7 +3878,7 @@ c_parser_struct_or_union_specifier (c_parser *parser)
 					 chainon (attrs, postfix_attrs)),
 				struct_info);
       ret.kind = ctsk_tagdef;
-      ret.expr = NULL_TREE;
+      ret.expr = expr;
       ret.expr_const_operands = true;
       ret.has_enum_type_specifier = false;
       timevar_pop (TV_PARSE_STRUCT);
@@ -3948,7 +3940,7 @@ c_parser_struct_or_union_specifier (c_parser *parser)
    expressions will be diagnosed as non-constant.  */
 
 static tree
-c_parser_struct_declaration (c_parser *parser)
+c_parser_struct_declaration (c_parser *parser, tree *expr)
 {
   struct c_declspecs *specs;
   tree prefix_attrs;
@@ -3961,7 +3953,7 @@ c_parser_struct_declaration (c_parser *parser)
       tree decl;
       ext = disable_extension_diagnostics ();
       c_parser_consume_token (parser);
-      decl = c_parser_struct_declaration (parser);
+      decl = c_parser_struct_declaration (parser, expr);
       restore_extension_diagnostics (ext);
       return decl;
     }
@@ -4007,7 +3999,7 @@ c_parser_struct_declaration (c_parser *parser)
 
 	  ret = grokfield (c_parser_peek_token (parser)->location,
 			   build_id_declarator (NULL_TREE), specs,
-			   NULL_TREE, &attrs);
+			   NULL_TREE, &attrs, expr);
 	  if (ret)
 	    decl_attributes (&ret, attrs, 0);
 	}
@@ -4068,7 +4060,7 @@ c_parser_struct_declaration (c_parser *parser)
 	  if (c_parser_next_token_is_keyword (parser, RID_ATTRIBUTE))
 	    postfix_attrs = c_parser_gnu_attributes (parser);
 	  d = grokfield (c_parser_peek_token (parser)->location,
-			 declarator, specs, width, &all_prefix_attrs);
+			 declarator, specs, width, &all_prefix_attrs, expr);
 	  decl_attributes (&d, chainon (postfix_attrs,
 					all_prefix_attrs), 0);
 	  DECL_CHAIN (d) = decls;
@@ -4154,7 +4146,7 @@ c_parser_typeof_specifier (c_parser *parser)
       if (type != NULL)
 	{
 	  ret.spec = groktypename (type, &ret.expr, &ret.expr_const_operands);
-	  pop_maybe_used (variably_modified_type_p (ret.spec, NULL_TREE));
+	  pop_maybe_used (c_type_variably_modified_p (ret.spec));
 	}
     }
   else
@@ -4169,7 +4161,7 @@ c_parser_typeof_specifier (c_parser *parser)
 	error_at (here, "%<typeof%> applied to a bit-field");
       mark_exp_read (expr.value);
       ret.spec = TREE_TYPE (expr.value);
-      was_vm = variably_modified_type_p (ret.spec, NULL_TREE);
+      was_vm = c_type_variably_modified_p (ret.spec);
       /* This is returned with the type so that when the type is
 	 evaluated, this can be evaluated.  */
       if (was_vm)
@@ -5689,11 +5681,14 @@ c_parser_initializer (c_parser *parser, tree decl)
     {
       struct c_expr ret;
       location_t loc = c_parser_peek_token (parser)->location;
-      if (decl != error_mark_node && C_DECL_VARIABLE_SIZE (decl))
-	error_at (loc,
-		  "variable-sized object may not be initialized except "
-		  "with an empty initializer");
       ret = c_parser_expr_no_commas (parser, NULL);
+      if (decl != error_mark_node && C_DECL_VARIABLE_SIZE (decl))
+	{
+	  error_at (loc,
+		    "variable-sized object may not be initialized except "
+		    "with an empty initializer");
+	  ret.set_error ();
+	}
       /* This is handled mostly by gimplify.cc, but we have to deal with
 	 not warning about int x = x; as it is a GCC extension to turn off
 	 this warning but only if warn_init_self is zero.  */
@@ -9069,7 +9064,7 @@ c_parser_has_attribute_expression (c_parser *parser)
       if (tname)
 	{
 	  oper = groktypename (tname, NULL, NULL);
-	  pop_maybe_used (variably_modified_type_p (oper, NULL_TREE));
+	  pop_maybe_used (c_type_variably_modified_p (oper));
 	}
     }
   else
@@ -9082,7 +9077,7 @@ c_parser_has_attribute_expression (c_parser *parser)
 	  mark_exp_read (cexpr.value);
 	  oper = cexpr.value;
 	  tree etype = TREE_TYPE (oper);
-	  bool was_vm = variably_modified_type_p (etype, NULL_TREE);
+	  bool was_vm = c_type_variably_modified_p (etype);
 	  /* This is returned with the type so that when the type is
 	     evaluated, this can be evaluated.  */
 	  if (was_vm)
@@ -9331,7 +9326,7 @@ c_parser_generic_selection (c_parser *parser)
 	    error_at (assoc.type_location,
 		      "%<_Generic%> association has incomplete type");
 
-	  if (variably_modified_type_p (assoc.type, NULL_TREE))
+	  if (c_type_variably_modified_p (assoc.type))
 	    error_at (assoc.type_location,
 		      "%<_Generic%> association has "
 		      "variable length type");
@@ -11741,7 +11736,7 @@ c_parser_objc_class_instance_variables (c_parser *parser)
 	}
 
       /* Parse some comma-separated declarations.  */
-      decls = c_parser_struct_declaration (parser);
+      decls = c_parser_struct_declaration (parser, NULL);
       if (decls == NULL)
 	{
 	  /* There is a syntax error.  We want to skip the offending
@@ -12880,7 +12875,7 @@ c_parser_objc_at_property_declaration (c_parser *parser)
   /* 'properties' is the list of properties that we read.  Usually a
      single one, but maybe more (eg, in "@property int a, b, c;" there
      are three).  */
-  tree properties = c_parser_struct_declaration (parser);
+  tree properties = c_parser_struct_declaration (parser, NULL);
 
   if (properties == error_mark_node)
     c_parser_skip_until_found (parser, CPP_SEMICOLON, NULL);
@@ -15739,7 +15734,7 @@ c_parser_omp_clause_reduction (c_parser *parser, enum omp_clause_code kind,
 		OMP_CLAUSE_REDUCTION_INSCAN (c) = 1;
 	      if (code == ERROR_MARK
 		  || !(INTEGRAL_TYPE_P (type)
-		       || TREE_CODE (type) == REAL_TYPE
+		       || SCALAR_FLOAT_TYPE_P (type)
 		       || TREE_CODE (type) == COMPLEX_TYPE))
 		OMP_CLAUSE_REDUCTION_PLACEHOLDER (c)
 		  = c_omp_reduction_lookup (reduc_id,
@@ -18825,32 +18820,71 @@ c_parser_oacc_wait (location_t loc, c_parser *parser, char *p_name)
   return stmt;
 }
 
-/* OpenMP 5.0:
-   # pragma omp allocate (list)  [allocator(allocator)]  */
+/* OpenMP 5.x:
+   # pragma omp allocate (list)  clauses
+
+   OpenMP 5.0 clause:
+   allocator (omp_allocator_handle_t expression)
+
+   OpenMP 5.1 additional clause:
+   align (constant-expression)]  */
 
 static void
 c_parser_omp_allocate (location_t loc, c_parser *parser)
 {
+  tree alignment = NULL_TREE;
   tree allocator = NULL_TREE;
   tree nl = c_parser_omp_var_list_parens (parser, OMP_CLAUSE_ALLOCATE, NULL_TREE);
-  if (c_parser_next_token_is (parser, CPP_COMMA)
-      && c_parser_peek_2nd_token (parser)->type == CPP_NAME)
-    c_parser_consume_token (parser);
-  if (c_parser_next_token_is (parser, CPP_NAME))
+  do
     {
+      if (c_parser_next_token_is (parser, CPP_COMMA)
+	  && c_parser_peek_2nd_token (parser)->type == CPP_NAME)
+	c_parser_consume_token (parser);
+      if (!c_parser_next_token_is (parser, CPP_NAME))
+	break;
       matching_parens parens;
       const char *p = IDENTIFIER_POINTER (c_parser_peek_token (parser)->value);
       c_parser_consume_token (parser);
-      if (strcmp ("allocator", p) != 0)
-	error_at (c_parser_peek_token (parser)->location,
-		  "expected %<allocator%>");
-      else if (parens.require_open (parser))
+      location_t expr_loc = c_parser_peek_token (parser)->location;
+      if (strcmp ("align", p) != 0 && strcmp ("allocator", p) != 0)
 	{
-	  location_t expr_loc = c_parser_peek_token (parser)->location;
-	  c_expr expr = c_parser_expr_no_commas (parser, NULL);
-	  expr = convert_lvalue_to_rvalue (expr_loc, expr, false, true);
-	  allocator = expr.value;
-	  allocator = c_fully_fold (allocator, false, NULL);
+	  error_at (c_parser_peek_token (parser)->location,
+		    "expected %<allocator%> or %<align%>");
+	  break;
+	}
+      if (!parens.require_open (parser))
+	break;
+
+      c_expr expr = c_parser_expr_no_commas (parser, NULL);
+      expr = convert_lvalue_to_rvalue (expr_loc, expr, false, true);
+      expr_loc = c_parser_peek_token (parser)->location;
+      if (p[2] == 'i' && alignment)
+	{
+	  error_at (expr_loc, "too many %qs clauses", "align");
+	  break;
+	}
+      else if (p[2] == 'i')
+	{
+	  alignment = c_fully_fold (expr.value, false, NULL);
+	  if (TREE_CODE (alignment) != INTEGER_CST
+	      || !INTEGRAL_TYPE_P (TREE_TYPE (alignment))
+	      || tree_int_cst_sgn (alignment) != 1
+	      || !integer_pow2p (alignment))
+	    {
+	      error_at (expr_loc, "%<align%> clause argument needs to be "
+				  "positive constant power of two integer "
+				  "expression");
+	      alignment = NULL_TREE;
+	    }
+	}
+      else if (allocator)
+	{
+	  error_at (expr_loc, "too many %qs clauses", "allocator");
+	  break;
+	}
+      else
+	{
+	  allocator = c_fully_fold (expr.value, false, NULL);
 	  tree orig_type
 	    = expr.original_type ? expr.original_type : TREE_TYPE (allocator);
 	  orig_type = TYPE_MAIN_VARIANT (orig_type);
@@ -18859,20 +18893,23 @@ c_parser_omp_allocate (location_t loc, c_parser *parser)
 	      || TYPE_NAME (orig_type)
 		 != get_identifier ("omp_allocator_handle_t"))
 	    {
-	      error_at (expr_loc, "%<allocator%> clause allocator expression "
-				"has type %qT rather than "
-				"%<omp_allocator_handle_t%>",
-				TREE_TYPE (allocator));
+	      error_at (expr_loc,
+			"%<allocator%> clause allocator expression has type "
+			"%qT rather than %<omp_allocator_handle_t%>",
+			TREE_TYPE (allocator));
 	      allocator = NULL_TREE;
 	    }
-	  parens.skip_until_found_close (parser);
 	}
-    }
+      parens.skip_until_found_close (parser);
+    } while (true);
   c_parser_skip_to_pragma_eol (parser);
 
-  if (allocator)
+  if (allocator || alignment)
     for (tree c = nl; c != NULL_TREE; c = OMP_CLAUSE_CHAIN (c))
-      OMP_CLAUSE_ALLOCATE_ALLOCATOR (c) = allocator;
+      {
+	OMP_CLAUSE_ALLOCATE_ALLOCATOR (c) = allocator;
+	OMP_CLAUSE_ALLOCATE_ALIGN (c) = alignment;
+      }
 
   sorry_at (loc, "%<#pragma omp allocate%> not yet supported");
 }
@@ -20082,6 +20119,7 @@ c_parser_omp_scan_loop_body (c_parser *parser, bool open_brace_parsed)
   tree substmt;
   location_t loc;
   tree clauses = NULL_TREE;
+  bool found_scan = false;
 
   loc = c_parser_peek_token (parser)->location;
   if (!open_brace_parsed
@@ -20092,7 +20130,15 @@ c_parser_omp_scan_loop_body (c_parser *parser, bool open_brace_parsed)
       return;
     }
 
-  substmt = c_parser_omp_structured_block_sequence (parser, PRAGMA_OMP_SCAN);
+  if (c_parser_peek_token (parser)->pragma_kind != PRAGMA_OMP_SCAN)
+    substmt = c_parser_omp_structured_block_sequence (parser, PRAGMA_OMP_SCAN);
+  else
+    {
+      warning_at (c_parser_peek_token (parser)->location, 0,
+		  "%<#pragma omp scan%> with zero preceding executable "
+		  "statements");
+      substmt = build_empty_stmt (loc);
+    }
   substmt = build2 (OMP_SCAN, void_type_node, substmt, NULL_TREE);
   SET_EXPR_LOCATION (substmt, loc);
   add_stmt (substmt);
@@ -20101,6 +20147,7 @@ c_parser_omp_scan_loop_body (c_parser *parser, bool open_brace_parsed)
   if (c_parser_peek_token (parser)->pragma_kind == PRAGMA_OMP_SCAN)
     {
       enum omp_clause_code clause = OMP_CLAUSE_ERROR;
+      found_scan = true;
 
       c_parser_consume_pragma (parser);
 
@@ -20130,7 +20177,15 @@ c_parser_omp_scan_loop_body (c_parser *parser, bool open_brace_parsed)
     error ("expected %<#pragma omp scan%>");
 
   clauses = c_finish_omp_clauses (clauses, C_ORT_OMP);
-  substmt = c_parser_omp_structured_block_sequence (parser, PRAGMA_NONE);
+  if (!c_parser_next_token_is (parser, CPP_CLOSE_BRACE))
+    substmt = c_parser_omp_structured_block_sequence (parser, PRAGMA_NONE);
+  else
+    {
+      if (found_scan)
+	warning_at (loc, 0, "%<#pragma omp scan%> with zero succeeding "
+			    "executable statements");
+      substmt = build_empty_stmt (loc);
+    }
   substmt = build2 (OMP_SCAN, void_type_node, substmt, clauses);
   SET_EXPR_LOCATION (substmt, loc);
   add_stmt (substmt);
@@ -23242,7 +23297,7 @@ c_parser_omp_declare_reduction (c_parser *parser, enum pragma_context context)
 	  if (type == error_mark_node)
 	    ;
 	  else if ((INTEGRAL_TYPE_P (type)
-		    || TREE_CODE (type) == REAL_TYPE
+		    || SCALAR_FLOAT_TYPE_P (type)
 		    || TREE_CODE (type) == COMPLEX_TYPE)
 		   && orig_reduc_id == NULL_TREE)
 	    error_at (loc, "predeclared arithmetic type in "

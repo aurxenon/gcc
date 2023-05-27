@@ -50,8 +50,6 @@ extern void ix86_reset_previous_fndecl (void);
 
 extern bool ix86_using_red_zone (void);
 
-extern rtx ix86_gen_scratch_sse_rtx (machine_mode);
-
 extern unsigned int ix86_regmode_natural_size (machine_mode);
 extern bool ix86_check_builtin_isa_match (unsigned int fcode);
 #ifdef RTX_CODE
@@ -168,6 +166,7 @@ extern void ix86_split_lshr (rtx *, rtx, machine_mode);
 extern void ix86_expand_v1ti_shift (enum rtx_code, rtx[]);
 extern void ix86_expand_v1ti_rotate (enum rtx_code, rtx[]);
 extern void ix86_expand_v1ti_ashiftrt (rtx[]);
+extern rtx ix86_replace_reg_with_reg (rtx, rtx, rtx);
 extern rtx ix86_find_base_term (rtx);
 extern bool ix86_check_movabs (rtx, int);
 extern bool ix86_check_no_addr_space (rtx);
@@ -216,6 +215,7 @@ extern void ix86_expand_round (rtx, rtx);
 extern void ix86_expand_rounddf_32 (rtx, rtx);
 extern void ix86_expand_round_sse4 (rtx, rtx);
 
+extern void ix86_expand_vecop_qihi_partial (enum rtx_code, rtx, rtx, rtx);
 extern void ix86_expand_vecop_qihi (enum rtx_code, rtx, rtx, rtx);
 extern rtx ix86_split_stack_guard (void);
 

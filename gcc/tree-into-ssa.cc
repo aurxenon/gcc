@@ -2348,8 +2348,7 @@ rewrite_blocks (basic_block entry, enum rewrite_mode what)
 	}
       while (!bitmap_empty_p (worklist))
 	{
-	  int idx = bitmap_first_set_bit (worklist);
-	  bitmap_clear_bit (worklist, idx);
+	  int idx = bitmap_clear_first_set_bit (worklist);
 	  basic_block bb = BASIC_BLOCK_FOR_FN (cfun, idx);
 	  bb->flags |= in_region;
 	  extra_rgn.safe_push (bb);
@@ -3561,6 +3560,8 @@ update_ssa (unsigned update_flags)
 	bitmap_initialize (&dfs[bb->index], &bitmap_default_obstack);
       compute_dominance_frontiers (dfs);
 
+      bitmap_tree_view (blocks_to_update);
+
       /* insert_update_phi_nodes_for will call add_new_name_mapping
 	 when inserting new PHI nodes, but it will not add any
 	 new members to OLD_SSA_NAMES.  */
@@ -3573,6 +3574,8 @@ update_ssa (unsigned update_flags)
       symbols_to_rename.qsort (insert_updated_phi_nodes_compare_uids);
       FOR_EACH_VEC_ELT (symbols_to_rename, i, sym)
 	insert_updated_phi_nodes_for (sym, dfs, update_flags);
+
+      bitmap_list_view (blocks_to_update);
 
       FOR_EACH_BB_FN (bb, cfun)
 	bitmap_clear (&dfs[bb->index]);

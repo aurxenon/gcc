@@ -41,6 +41,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "internal-fn.h"
 #include "stringpool.h"
 #include "attribs.h"
+#include "decl.h"
 #include "gcc-rich-location.h"
 
 /* The various kinds of conversion.  */
@@ -2745,7 +2746,7 @@ promoted_arithmetic_type_p (tree type)
      integral types plus floating types.  */
   return ((CP_INTEGRAL_TYPE_P (type)
 	   && same_type_p (type_promotes_to (type), type))
-	  || TREE_CODE (type) == REAL_TYPE);
+	  || SCALAR_FLOAT_TYPE_P (type));
 }
 
 /* Create any builtin operator overload candidates for the operator in
@@ -3612,7 +3613,9 @@ add_template_candidate_real (struct z_candidate **candidates, tree tmpl,
   /* Now the explicit specifier might have been deduced; check if this
      declaration is explicit.  If it is and we're ignoring non-converting
      constructors, don't add this function to the set of candidates.  */
-  if ((flags & LOOKUP_ONLYCONVERTING) && DECL_NONCONVERTING_P (fn))
+  if (((flags & (LOOKUP_ONLYCONVERTING|LOOKUP_LIST_INIT_CTOR))
+       == LOOKUP_ONLYCONVERTING)
+      && DECL_NONCONVERTING_P (fn))
     return NULL;
 
   if (DECL_CONSTRUCTOR_P (fn) && nargs == 2)
@@ -3844,6 +3847,7 @@ print_conversion_rejection (location_t loc, struct conversion_info *info,
       if (info->n_arg >= 0)
 	inform (loc, "  conversion of argument %d would be ill-formed:",
 		info->n_arg + 1);
+      iloc_sentinel ils = loc;
       perform_implicit_conversion (info->to_type, info->from,
 				   tf_warning_or_error);
     }
@@ -4125,6 +4129,14 @@ add_list_candidates (tree fns, tree first_arg,
   if (CONSTRUCTOR_NELTS (init_list) == 0
       && TYPE_HAS_DEFAULT_CONSTRUCTOR (totype))
     ;
+  else if (CONSTRUCTOR_IS_DESIGNATED_INIT (init_list)
+	   && !CP_AGGREGATE_TYPE_P (totype))
+    {
+      if (complain & tf_error)
+	error ("designated initializers cannot be used with a "
+	       "non-aggregate type %qT", totype);
+      return;
+    }
   /* If the class has a list ctor, try passing the list as a single
      argument first, but only consider list ctors.  */
   else if (TYPE_HAS_LIST_CTOR (totype))
@@ -4135,14 +4147,6 @@ add_list_candidates (tree fns, tree first_arg,
 		      access_path, flags, candidates, complain);
       if (any_strictly_viable (*candidates))
 	return;
-    }
-  else if (CONSTRUCTOR_IS_DESIGNATED_INIT (init_list)
-	   && !CP_AGGREGATE_TYPE_P (totype))
-    {
-      if (complain & tf_error)
-	error ("designated initializers cannot be used with a "
-	       "non-aggregate type %qT", totype);
-      return;
     }
 
   /* Expand the CONSTRUCTOR into a new argument vec.  */
@@ -5755,10 +5759,10 @@ build_conditional_expr (const op_location_t &loc,
   if ((TREE_CODE (arg2) == EXCESS_PRECISION_EXPR
        || TREE_CODE (arg3) == EXCESS_PRECISION_EXPR)
       && (TREE_CODE (arg2_type) == INTEGER_TYPE
-	  || TREE_CODE (arg2_type) == REAL_TYPE
+	  || SCALAR_FLOAT_TYPE_P (arg2_type)
 	  || TREE_CODE (arg2_type) == COMPLEX_TYPE)
       && (TREE_CODE (arg3_type) == INTEGER_TYPE
-	  || TREE_CODE (arg3_type) == REAL_TYPE
+	  || SCALAR_FLOAT_TYPE_P (arg3_type)
 	  || TREE_CODE (arg3_type) == COMPLEX_TYPE))
     {
       semantic_result_type
@@ -5771,8 +5775,8 @@ build_conditional_expr (const op_location_t &loc,
 	    t1 = TREE_TYPE (t1);
 	  if (TREE_CODE (t2) == COMPLEX_TYPE)
 	    t2 = TREE_TYPE (t2);
-	  gcc_checking_assert (TREE_CODE (t1) == REAL_TYPE
-			       && TREE_CODE (t2) == REAL_TYPE
+	  gcc_checking_assert (SCALAR_FLOAT_TYPE_P (t1)
+			       && SCALAR_FLOAT_TYPE_P (t2)
 			       && (extended_float_type_p (t1)
 				   || extended_float_type_p (t2))
 			       && cp_compare_floating_point_conversion_ranks
@@ -6123,8 +6127,8 @@ build_conditional_expr (const op_location_t &loc,
 	    t1 = TREE_TYPE (t1);
 	  if (TREE_CODE (t2) == COMPLEX_TYPE)
 	    t2 = TREE_TYPE (t2);
-	  gcc_checking_assert (TREE_CODE (t1) == REAL_TYPE
-			       && TREE_CODE (t2) == REAL_TYPE
+	  gcc_checking_assert (SCALAR_FLOAT_TYPE_P (t1)
+			       && SCALAR_FLOAT_TYPE_P (t2)
 			       && (extended_float_type_p (t1)
 				   || extended_float_type_p (t2))
 			       && cp_compare_floating_point_conversion_ranks
@@ -6143,8 +6147,8 @@ build_conditional_expr (const op_location_t &loc,
 	    t1 = TREE_TYPE (t1);
 	  if (TREE_CODE (t2) == COMPLEX_TYPE)
 	    t2 = TREE_TYPE (t2);
-	  gcc_checking_assert (TREE_CODE (t1) == REAL_TYPE
-			       && TREE_CODE (t2) == REAL_TYPE
+	  gcc_checking_assert (SCALAR_FLOAT_TYPE_P (t1)
+			       && SCALAR_FLOAT_TYPE_P (t2)
 			       && (extended_float_type_p (t1)
 				   || extended_float_type_p (t2))
 			       && cp_compare_floating_point_conversion_ranks
@@ -6181,8 +6185,8 @@ build_conditional_expr (const op_location_t &loc,
       else if ((complain & tf_warning)
 	       && warn_deprecated_enum_float_conv
 	       && ((TREE_CODE (arg2_type) == ENUMERAL_TYPE
-		    && TREE_CODE (arg3_type) == REAL_TYPE)
-		   || (TREE_CODE (arg2_type) == REAL_TYPE
+		    && SCALAR_FLOAT_TYPE_P (arg3_type))
+		   || (SCALAR_FLOAT_TYPE_P (arg2_type)
 		       && TREE_CODE (arg3_type) == ENUMERAL_TYPE)))
 	{
 	  if (TREE_CODE (arg2_type) == ENUMERAL_TYPE)
@@ -7335,7 +7339,7 @@ build_new_op (const op_location_t &loc, enum tree_code code, int flags,
     case TRUTH_ORIF_EXPR:
     case TRUTH_AND_EXPR:
     case TRUTH_OR_EXPR:
-      if (complain & tf_warning)
+      if ((complain & tf_warning) && !processing_template_decl)
 	warn_logical_operator (loc, code, boolean_type_node,
 			       code_orig_arg1, arg1,
 			       code_orig_arg2, arg2);
@@ -8293,7 +8297,7 @@ convert_like_internal (conversion *convs, tree expr, tree fn, int argnum,
 	  || SCALAR_TYPE_P (totype))
       && convs->kind != ck_base)
     {
-      bool complained = false;
+      int complained = 0;
       conversion *t = convs;
 
       /* Give a helpful error if this is bad because of excess braces.  */
@@ -8317,22 +8321,26 @@ convert_like_internal (conversion *convs, tree expr, tree fn, int argnum,
 				"direct-initialization",
 				totype, TREE_TYPE (expr));
 
-      if (TREE_CODE (TREE_TYPE (expr)) == REAL_TYPE
-	  && TREE_CODE (totype) == REAL_TYPE
+      if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (expr))
+	  && SCALAR_FLOAT_TYPE_P (totype)
 	  && (extended_float_type_p (TREE_TYPE (expr))
 	      || extended_float_type_p (totype)))
 	switch (cp_compare_floating_point_conversion_ranks (TREE_TYPE (expr),
 							    totype))
 	  {
 	  case 2:
-	    pedwarn (loc, 0, "converting to %qH from %qI with greater "
-			     "conversion rank", totype, TREE_TYPE (expr));
-	    complained = true;
+	    if (pedwarn (loc, 0, "converting to %qH from %qI with greater "
+				 "conversion rank", totype, TREE_TYPE (expr)))
+	      complained = 1;
+	    else if (!complained)
+	      complained = -1;
 	    break;
 	  case 3:
-	    pedwarn (loc, 0, "converting to %qH from %qI with unordered "
-			     "conversion ranks", totype, TREE_TYPE (expr));
-	    complained = true;
+	    if (pedwarn (loc, 0, "converting to %qH from %qI with unordered "
+				 "conversion ranks", totype, TREE_TYPE (expr)))
+	      complained = 1;
+	    else if (!complained)
+	      complained = -1;
 	    break;
 	  default:
 	    break;
@@ -8352,15 +8360,6 @@ convert_like_internal (conversion *convs, tree expr, tree fn, int argnum,
 				   /*issue_conversion_warnings=*/false,
 				   /*c_cast_p=*/false, /*nested_p=*/true,
 				   complain);
-	      if (convs->kind == ck_ref_bind)
-		expr = convert_to_reference (totype, expr, CONV_IMPLICIT,
-					     LOOKUP_NORMAL, NULL_TREE,
-					     complain);
-	      else
-		expr = cp_convert (totype, expr, complain);
-	      if (complained)
-		maybe_inform_about_fndecl_for_bogus_argument_init (fn, argnum);
-	      return expr;
 	    }
 	  else if (t->kind == ck_user || !t->bad_p)
 	    {
@@ -8368,6 +8367,8 @@ convert_like_internal (conversion *convs, tree expr, tree fn, int argnum,
 				   /*issue_conversion_warnings=*/false,
 				   /*c_cast_p=*/false, /*nested_p=*/true,
 				   complain);
+	      if (t->bad_p)
+		complained = 1;
 	      break;
 	    }
 	  else if (t->kind == ck_ambig)
@@ -8386,10 +8387,15 @@ convert_like_internal (conversion *convs, tree expr, tree fn, int argnum,
 				  "invalid conversion from %qH to %qI",
 				  TREE_TYPE (expr), totype);
 	}
-      if (complained)
+      if (convs->kind == ck_ref_bind)
+	expr = convert_to_reference (totype, expr, CONV_IMPLICIT,
+				     LOOKUP_NORMAL, NULL_TREE,
+				     complain);
+      else
+	expr = cp_convert (totype, expr, complain);
+      if (complained == 1)
 	maybe_inform_about_fndecl_for_bogus_argument_init (fn, argnum);
-
-      return cp_convert (totype, expr, complain);
+      return expr;
     }
 
   if (issue_conversion_warnings && (complain & tf_warning))
@@ -8968,7 +8974,7 @@ convert_arg_to_ellipsis (tree arg, tsubst_flags_t complain)
      type that is subject to the floating-point promotion
      (_conv.fpprom_), the value of the argument is converted to the
      promoted type before the call.  */
-  if (TREE_CODE (arg_type) == REAL_TYPE
+  if (SCALAR_FLOAT_TYPE_P (arg_type)
       && (TYPE_PRECISION (arg_type)
 	  < TYPE_PRECISION (double_type_node))
       && !DECIMAL_FLOAT_MODE_P (TYPE_MODE (arg_type))
@@ -9790,7 +9796,7 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 	      obj_arg = NULL_TREE;
 	    }
 	  /* Look through *(const T *)&obj.  */
-	  else if (obj_arg && TREE_CODE (obj_arg) == INDIRECT_REF)
+	  else if (obj_arg && INDIRECT_REF_P (obj_arg))
 	    {
 	      tree addr = TREE_OPERAND (obj_arg, 0);
 	      STRIP_NOPS (addr);
@@ -10411,10 +10417,11 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
     }
   else
     {
-      /* If FN is marked deprecated, then we've already issued a deprecated-use
-	 warning from mark_used above, so avoid redundantly issuing another one
-	 from build_addr_func.  */
-      warning_sentinel w (warn_deprecated_decl);
+      /* If FN is marked deprecated or unavailable, then we've already
+	 issued a diagnostic from mark_used above, so avoid redundantly
+	 issuing another one from build_addr_func.  */
+      auto w = make_temp_override (deprecated_state,
+				   UNAVAILABLE_DEPRECATED_SUPPRESS);
 
       fn = build_addr_func (fn, complain);
       if (fn == error_mark_node)
@@ -10453,7 +10460,7 @@ build_over_call (struct z_candidate *cand, int flags, tsubst_flags_t complain)
 	      obj_arg = NULL_TREE;
 	    }
 	  /* Look through *(const T *)&obj.  */
-	  else if (obj_arg && TREE_CODE (obj_arg) == INDIRECT_REF)
+	  else if (obj_arg && INDIRECT_REF_P (obj_arg))
 	    {
 	      tree addr = TREE_OPERAND (obj_arg, 0);
 	      STRIP_NOPS (addr);
@@ -12190,7 +12197,7 @@ compare_ics (conversion *ics1, conversion *ics2)
 	std::swap (fp3, t3);
       }
     if (TYPE_MAIN_VARIANT (fp1) == TYPE_MAIN_VARIANT (fp3)
-	&& TREE_CODE (fp1) == REAL_TYPE
+	&& SCALAR_FLOAT_TYPE_P (fp1)
 	/* Only apply this rule if at least one of the 3 types is
 	   extended floating-point type, otherwise keep them as
 	   before for compatibility reasons with types like __float128.
@@ -12198,15 +12205,15 @@ compare_ics (conversion *ics1, conversion *ics2)
 	   ranks and so when just those 3 types are involved, this
 	   rule doesn't trigger.  */
 	&& (extended_float_type_p (fp1)
-	    || (TREE_CODE (fp2) == REAL_TYPE && extended_float_type_p (fp2))
-	    || (TREE_CODE (t3) == REAL_TYPE && extended_float_type_p (t3))))
+	    || (SCALAR_FLOAT_TYPE_P (fp2) && extended_float_type_p (fp2))
+	    || (SCALAR_FLOAT_TYPE_P (t3) && extended_float_type_p (t3))))
       {
 	if (TREE_CODE (fp2) != REAL_TYPE)
 	  {
 	    ret = -ret;
 	    std::swap (fp2, t3);
 	  }
-	if (TREE_CODE (fp2) == REAL_TYPE)
+	if (SCALAR_FLOAT_TYPE_P (fp2))
 	  {
 	    /* cp_compare_floating_point_conversion_ranks returns -1, 0 or 1
 	       if the conversion rank is equal (-1 or 1 if the subrank is
@@ -12233,7 +12240,7 @@ compare_ics (conversion *ics1, conversion *ics2)
 		     FP1 <-> T3 conversion is better.  */
 		  return -ret;
 	      }
-	    else if (TREE_CODE (t3) == REAL_TYPE
+	    else if (SCALAR_FLOAT_TYPE_P (t3)
 		     && IN_RANGE (cp_compare_floating_point_conversion_ranks
 								(fp1, t3),
 				  -1, 1))
@@ -12542,6 +12549,8 @@ joust_maybe_elide_copy (z_candidate *&cand)
   if (!DECL_COPY_CONSTRUCTOR_P (fn) && !DECL_MOVE_CONSTRUCTOR_P (fn))
     return false;
   conversion *conv = cand->convs[0];
+  if (conv->kind == ck_ambig)
+    return false;
   gcc_checking_assert (conv->kind == ck_ref_bind);
   conv = next_conversion (conv);
   if (conv->kind == ck_user && !TYPE_REF_P (conv->type))
@@ -13583,7 +13592,7 @@ set_up_extended_ref_temp (tree decl, tree expr, vec<tree, va_gc> **cleanups,
 
   /* If the initializer is constant, put it in DECL_INITIAL so we get
      static initialization and use in constant expressions.  */
-  init = maybe_constant_init (expr);
+  init = maybe_constant_init (expr, var, /*manifestly_const_eval=*/true);
   /* As in store_init_value.  */
   init = cp_fully_fold (init);
   if (TREE_CONSTANT (init))
@@ -13777,6 +13786,64 @@ std_pair_ref_ref_p (tree t)
   return true;
 }
 
+/* Return true if a class CTYPE is either std::reference_wrapper or
+   std::ref_view, or a reference wrapper class.  We consider a class
+   a reference wrapper class if it has a reference member.  We no
+   longer check that it has a constructor taking the same reference type
+   since that approach still generated too many false positives.  */
+
+static bool
+class_has_reference_member_p (tree t)
+{
+  for (tree fields = TYPE_FIELDS (t);
+       fields;
+       fields = DECL_CHAIN (fields))
+    if (TREE_CODE (fields) == FIELD_DECL
+	&& !DECL_ARTIFICIAL (fields)
+	&& TYPE_REF_P (TREE_TYPE (fields)))
+      return true;
+  return false;
+}
+
+/* A wrapper for the above suitable as a callback for dfs_walk_once.  */
+
+static tree
+class_has_reference_member_p_r (tree binfo, void *)
+{
+  return (class_has_reference_member_p (BINFO_TYPE (binfo))
+	  ? integer_one_node : NULL_TREE);
+}
+
+static bool
+reference_like_class_p (tree ctype)
+{
+  if (!CLASS_TYPE_P (ctype))
+    return false;
+
+  /* Also accept a std::pair<const T&, const T&>.  */
+  if (std_pair_ref_ref_p (ctype))
+    return true;
+
+  tree tdecl = TYPE_NAME (TYPE_MAIN_VARIANT (ctype));
+  if (decl_in_std_namespace_p (tdecl))
+    {
+      tree name = DECL_NAME (tdecl);
+      if (name
+	  && (id_equal (name, "reference_wrapper")
+	      || id_equal (name, "span")
+	      || id_equal (name, "ref_view")))
+	return true;
+    }
+
+  /* Some classes, such as std::tuple, have the reference member in its
+     (non-direct) base class.  */
+  if (dfs_walk_once (TYPE_BINFO (ctype), class_has_reference_member_p_r,
+		     nullptr, nullptr))
+    return true;
+
+  return false;
+}
+
 /* Helper for maybe_warn_dangling_reference to find a problematic CALL_EXPR
    that initializes the LHS (and at least one of its arguments represents
    a temporary, as outlined in maybe_warn_dangling_reference), or NULL_TREE
@@ -13791,12 +13858,37 @@ std_pair_ref_ref_p (tree t)
      const int& y = (f(1), 42); // NULL_TREE
      const int& z = f(f(1)); // f(f(1))
 
-   EXPR is the initializer.  */
+   EXPR is the initializer.  If ARG_P is true, we're processing an argument
+   to a function; the point is to distinguish between, for example,
+
+     Ref::inner (&TARGET_EXPR <D.2839, F::foo (fm)>)
+
+   where we shouldn't warn, and
+
+     Ref::inner (&TARGET_EXPR <D.2908, F::foo (&TARGET_EXPR <...>)>)
+
+   where we should warn (Ref is a reference_like_class_p so we see through
+   it.  */
 
 static tree
-do_warn_dangling_reference (tree expr)
+do_warn_dangling_reference (tree expr, bool arg_p)
 {
   STRIP_NOPS (expr);
+
+  if (arg_p && expr_represents_temporary_p (expr))
+    {
+      /* An attempt to reduce the number of -Wdangling-reference
+	 false positives concerning reference wrappers (c++/107532).
+	 When we encounter a reference_like_class_p, we don't warn
+	 just yet; instead, we keep recursing to see if there were
+	 any temporaries behind the reference-wrapper class.  */
+      tree e = expr;
+      while (handled_component_p (e))
+	e = TREE_OPERAND (e, 0);
+      if (!reference_like_class_p (TREE_TYPE (e)))
+	return expr;
+    }
+
   switch (TREE_CODE (expr))
     {
     case CALL_EXPR:
@@ -13829,7 +13921,7 @@ do_warn_dangling_reference (tree expr)
 	     std::pair<const int&, const int&> v = std::minmax(1, 2);
 	   which also creates a dangling reference, because std::minmax
 	   returns std::pair<const T&, const T&>(b, a).  */
-	if (!(TYPE_REF_OBJ_P (rettype) || std_pair_ref_ref_p (rettype)))
+	if (!(TYPE_REF_OBJ_P (rettype) || reference_like_class_p (rettype)))
 	  return NULL_TREE;
 
 	/* Here we're looking to see if any of the arguments is a temporary
@@ -13842,14 +13934,13 @@ do_warn_dangling_reference (tree expr)
 	    if (!DECL_NONSTATIC_MEMBER_FUNCTION_P (fndecl)
 		&& !TYPE_REF_P (TREE_TYPE (arg)))
 	      continue;
-	    /* It could also be another call taking a temporary and returning
-	       it and initializing this reference parameter.  */
-	    if (do_warn_dangling_reference (arg))
-	      return expr;
 	    STRIP_NOPS (arg);
 	    if (TREE_CODE (arg) == ADDR_EXPR)
 	      arg = TREE_OPERAND (arg, 0);
-	    if (expr_represents_temporary_p (arg))
+	    /* Recurse to see if the argument is a temporary.  It could also
+	       be another call taking a temporary and returning it and
+	       initializing this reference parameter.  */
+	    if (do_warn_dangling_reference (arg, /*arg_p=*/true))
 	      return expr;
 	  /* Don't warn about member function like:
 	      std::any a(...);
@@ -13866,15 +13957,15 @@ do_warn_dangling_reference (tree expr)
 	return NULL_TREE;
       }
     case COMPOUND_EXPR:
-      return do_warn_dangling_reference (TREE_OPERAND (expr, 1));
+      return do_warn_dangling_reference (TREE_OPERAND (expr, 1), arg_p);
     case COND_EXPR:
-      if (tree t = do_warn_dangling_reference (TREE_OPERAND (expr, 1)))
+      if (tree t = do_warn_dangling_reference (TREE_OPERAND (expr, 1), arg_p))
 	return t;
-      return do_warn_dangling_reference (TREE_OPERAND (expr, 2));
+      return do_warn_dangling_reference (TREE_OPERAND (expr, 2), arg_p);
     case PAREN_EXPR:
-      return do_warn_dangling_reference (TREE_OPERAND (expr, 0));
+      return do_warn_dangling_reference (TREE_OPERAND (expr, 0), arg_p);
     case TARGET_EXPR:
-      return do_warn_dangling_reference (TARGET_EXPR_INITIAL (expr));
+      return do_warn_dangling_reference (TARGET_EXPR_INITIAL (expr), arg_p);
     default:
       return NULL_TREE;
     }
@@ -13917,7 +14008,7 @@ maybe_warn_dangling_reference (const_tree decl, tree init)
     = make_temp_override (global_dc->dc_warn_system_headers,
 			  (!in_system_header_at (DECL_SOURCE_LOCATION (decl))
 			   || global_dc->dc_warn_system_headers));
-  if (tree call = do_warn_dangling_reference (init))
+  if (tree call = do_warn_dangling_reference (init, /*arg_p=*/false))
     {
       auto_diagnostic_group d;
       if (warning_at (DECL_SOURCE_LOCATION (decl), OPT_Wdangling_reference,

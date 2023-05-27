@@ -49,6 +49,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-cfg.h"
 #include "gimple-fold.h"
 #include "varasm.h"
+#include "realmpfr.h"
 
 /* Map from a tree to a VAR_DECL tree.  */
 
@@ -327,7 +328,7 @@ ubsan_source_location (location_t loc)
 static unsigned short
 get_ubsan_type_info_for_type (tree type)
 {
-  if (TREE_CODE (type) == REAL_TYPE)
+  if (SCALAR_FLOAT_TYPE_P (type))
     return tree_to_uhwi (TYPE_SIZE (type));
   else if (INTEGRAL_TYPE_P (type))
     {
@@ -649,7 +650,7 @@ sanitize_unreachable_fn (tree *data, location_t loc)
       ? (flag_sanitize_trap & SANITIZE_UNREACHABLE)
       : flag_unreachable_traps)
     {
-      fn = builtin_decl_explicit (BUILT_IN_TRAP);
+      fn = builtin_decl_explicit (BUILT_IN_UNREACHABLE_TRAP);
       *data = NULL_TREE;
     }
   else if (san)
@@ -721,7 +722,7 @@ ubsan_expand_bounds_ifn (gimple_stmt_iterator *gsi)
 
   gimple_stmt_iterator gsi_orig = *gsi;
 
-  /* Create condition "if (index > bound)".  */
+  /* Create condition "if (index >= bound)".  */
   basic_block then_bb, fallthru_bb;
   gimple_stmt_iterator cond_insert_point
     = create_cond_insert_point (gsi, false, false, true,
@@ -730,7 +731,7 @@ ubsan_expand_bounds_ifn (gimple_stmt_iterator *gsi)
   index = force_gimple_operand_gsi (&cond_insert_point, index,
 				    true, NULL_TREE,
 				    false, GSI_NEW_STMT);
-  gimple *g = gimple_build_cond (GT_EXPR, index, bound, NULL_TREE, NULL_TREE);
+  gimple *g = gimple_build_cond (GE_EXPR, index, bound, NULL_TREE, NULL_TREE);
   gimple_set_location (g, loc);
   gsi_insert_after (&cond_insert_point, g, GSI_NEW_STMT);
 
@@ -1877,16 +1878,15 @@ ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
       /* For _Decimal128 up to 34 decimal digits, - sign,
 	 dot, e, exponent.  */
       char buf[64];
-      mpfr_t m;
       int p = REAL_MODE_FORMAT (mode)->p;
       REAL_VALUE_TYPE maxval, minval;
 
       /* Use mpfr_snprintf rounding to compute the smallest
 	 representable decimal number greater or equal than
 	 1 << (prec - !uns_p).  */
-      mpfr_init2 (m, prec + 2);
+      auto_mpfr m (prec + 2);
       mpfr_set_ui_2exp (m, 1, prec - !uns_p, MPFR_RNDN);
-      mpfr_snprintf (buf, sizeof buf, "%.*RUe", p - 1, m);
+      mpfr_snprintf (buf, sizeof buf, "%.*RUe", p - 1, (mpfr_srcptr) m);
       decimal_real_from_string (&maxval, buf);
       max = build_real (expr_type, maxval);
 
@@ -1900,11 +1900,10 @@ ubsan_instrument_float_cast (location_t loc, tree type, tree expr)
 	     (-1 << (prec - 1)) - 1.  */
 	  mpfr_set_si_2exp (m, -1, prec - 1, MPFR_RNDN);
 	  mpfr_sub_ui (m, m, 1, MPFR_RNDN);
-	  mpfr_snprintf (buf, sizeof buf, "%.*RDe", p - 1, m);
+	  mpfr_snprintf (buf, sizeof buf, "%.*RDe", p - 1, (mpfr_srcptr) m);
 	  decimal_real_from_string (&minval, buf);
 	  min = build_real (expr_type, minval);
 	}
-      mpfr_clear (m);
     }
   else
     return NULL_TREE;

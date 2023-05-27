@@ -91,6 +91,9 @@ complain_wrong_lang (const struct cl_decoded_option *decoded,
   char *ok_langs = NULL, *bad_lang = NULL;
   unsigned int opt_flags = option->flags;
 
+  if (!warn_complain_wrong_lang)
+    return;
+
   if (!lang_hooks.complain_wrong_lang_p (option))
     return;
 
@@ -364,6 +367,7 @@ handle_common_deferred_options (void)
   if (flag_opt_info)
     opt_info_switch_p (NULL);
 
+  flag_canon_prefix_map = false;
   FOR_EACH_VEC_ELT (v, i, opt)
     {
       switch (opt->opt_index)
@@ -392,8 +396,12 @@ handle_common_deferred_options (void)
 	  add_profile_prefix_map (opt->arg);
 	  break;
 
+	case OPT_fcanon_prefix_map:
+	  flag_canon_prefix_map = opt->value;
+	  break;
+
 	case OPT_fdump_:
-	  g->get_dumps ()->dump_switch_p (opt->arg);
+	  /* Deferred until plugins initialized.  */
 	  break;
 
         case OPT_fopt_info_:
@@ -485,4 +493,22 @@ handle_common_deferred_options (void)
 	  gcc_unreachable ();
 	}
     }
+}
+
+/* Handle deferred dump options.  */
+
+void
+handle_deferred_dump_options (void)
+{
+  unsigned int i;
+  cl_deferred_option *opt;
+  vec<cl_deferred_option> v;
+
+  if (common_deferred_options)
+    v = *((vec<cl_deferred_option> *) common_deferred_options);
+  else
+    v = vNULL;
+  FOR_EACH_VEC_ELT (v, i, opt)
+    if (opt->opt_index == OPT_fdump_)
+      g->get_dumps ()->dump_switch_p (opt->arg);
 }

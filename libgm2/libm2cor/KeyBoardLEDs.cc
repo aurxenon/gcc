@@ -27,6 +27,10 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #include <config.h>
 #include <m2rts.h>
 
+#define EXPORT(FUNC) m2cor ## _KeyBoardLEDs_ ## FUNC
+#define M2EXPORT(FUNC) m2cor ## _M2_KeyBoardLEDs_ ## FUNC
+#define M2LIBNAME "m2cor"
+
 #if defined(linux)
 
 #include <sys/types.h>
@@ -36,69 +40,18 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #include <sys/ioctl.h>
 #include <stdio.h>
 
-#if !defined(TRUE)
-#   define TRUE (1==1)
-#endif
-#if !defined(FALSE)
-#   define FALSE (1==0)
-#endif
-
 #include <stdlib.h>
 
 static int fd;
-static int initialized = FALSE;
+static bool initialized = false;
 
 
-extern "C" void
-KeyBoardLEDs_SwitchScroll (int scrolllock)
-{
-  unsigned char leds;
-  int r = ioctl (fd, KDGETLED, &leds);
-  if (scrolllock)
-    leds = leds | LED_SCR;
-  else
-    leds = leds & (~ LED_SCR);
-  r = ioctl (fd, KDSETLED, leds);
-}
-
-extern "C" void
-KeyBoardLEDs_SwitchNum (int numlock)
-{
-  unsigned char leds;
-  int r = ioctl (fd, KDGETLED, &leds);
-  if (numlock)
-    leds = leds | LED_NUM;
-  else
-    leds = leds & (~ LED_NUM);
-  r = ioctl (fd, KDSETLED, leds);
-}
-
-extern "C" void
-KeyBoardLEDs_SwitchCaps (int capslock)
-{
-  unsigned char leds;
-  int r = ioctl (fd, KDGETLED, &leds);
-  if (capslock)
-    leds = leds | LED_CAP;
-  else
-    leds = leds & (~ LED_CAP);
-  r = ioctl (fd, KDSETLED, leds);
-}
-
-extern "C" void
-KeyBoardLEDs_SwitchLeds (int numlock, int capslock, int scrolllock)
-{
-  KeyBoardLEDs_SwitchScroll (scrolllock);
-  KeyBoardLEDs_SwitchNum (numlock);
-  KeyBoardLEDs_SwitchCaps (capslock);
-}
-
-extern "C" void
-_M2_KeyBoardLEDs_init (int, char **, char **)
+void
+initialize_module (void)
 {
   if (! initialized)
     {
-      initialized = TRUE;
+      initialized = true;
       fd = open ("/dev/tty", O_RDONLY);
       if (fd == -1)
 	{
@@ -108,49 +61,104 @@ _M2_KeyBoardLEDs_init (int, char **, char **)
     }
 }
 
+extern "C" void
+EXPORT(SwitchScroll) (int scrolllock)
+{
+  unsigned char leds;
+
+  initialize_module ();
+  int r = ioctl (fd, KDGETLED, &leds);
+  if (scrolllock)
+    leds = leds | LED_SCR;
+  else
+    leds = leds & (~ LED_SCR);
+  r = ioctl (fd, KDSETLED, leds);
+}
+
+extern "C" void
+EXPORT(SwitchNum) (int numlock)
+{
+  unsigned char leds;
+
+  initialize_module ();
+  int r = ioctl (fd, KDGETLED, &leds);
+  if (numlock)
+    leds = leds | LED_NUM;
+  else
+    leds = leds & (~ LED_NUM);
+  r = ioctl (fd, KDSETLED, leds);
+}
+
+extern "C" void
+EXPORT(SwitchCaps) (int capslock)
+{
+  unsigned char leds;
+
+  initialize_module ();
+  int r = ioctl (fd, KDGETLED, &leds);
+  if (capslock)
+    leds = leds | LED_CAP;
+  else
+    leds = leds & (~ LED_CAP);
+  r = ioctl (fd, KDSETLED, leds);
+}
+
+extern "C" void
+EXPORT(SwitchLeds) (int numlock, int capslock, int scrolllock)
+{
+  EXPORT(SwitchScroll) (scrolllock);
+  EXPORT(SwitchNum) (numlock);
+  EXPORT(SwitchCaps) (capslock);
+}
+
+extern "C" void
+M2EXPORT(init) (int, char **, char **)
+{
+}
+
 #else
 extern "C" void
-KeyBoardLEDs_SwitchLeds (int numlock, int capslock, int scrolllock)
+EXPORT(SwitchLeds) (int numlock, int capslock, int scrolllock)
 {
 }
 
 extern "C" void
-KeyBoardLEDs_SwitchScroll (int scrolllock)
+EXPORT(SwitchScroll) (int scrolllock)
 {
 }
 
 extern "C" void
-KeyBoardLEDs_SwitchNum (int numlock)
+EXPORT(SwitchNum) (int numlock)
 {
 }
 
 extern "C" void
-KeyBoardLEDs_SwitchCaps (int capslock)
+EXPORT(SwitchCaps) (int capslock)
 {
 }
 
 extern "C" void
-_M2_KeyBoardLEDs_init (int, char **, char **)
+M2EXPORT(init) (int, char **, char **)
 {
 }
-
 #endif
 
 /* GNU Modula-2 linking hooks.  */
 
 extern "C" void
-_M2_KeyBoardLEDs_finish (int, char **, char **)
+M2EXPORT(fini) (int, char **, char **)
 {
 }
 
 extern "C" void
-_M2_KeyBoardLEDs_dep (void)
+M2EXPORT(dep) (void)
 {
 }
 
 extern "C" void __attribute__((__constructor__))
- _M2_KeyBoardLEDs_ctor (void)
+M2EXPORT(ctor) (void)
 {
-  M2RTS_RegisterModule ("KeyBoardLEDs", _M2_KeyBoardLEDs_init, _M2_KeyBoardLEDs_finish,
-			_M2_KeyBoardLEDs_dep);
+  m2pim_M2RTS_RegisterModule ("KeyBoardLEDs", M2LIBNAME,
+			      M2EXPORT(init), M2EXPORT(fini),
+			      M2EXPORT(dep));
 }

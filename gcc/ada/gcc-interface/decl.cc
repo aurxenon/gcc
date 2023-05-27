@@ -785,7 +785,7 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 	if ((TREE_CODE (gnu_type) == UNCONSTRAINED_ARRAY_TYPE
 	     && No (gnat_renamed_obj))
 	    || TYPE_IS_DUMMY_P (gnu_type)
-	    || TREE_CODE (gnu_type) == VOID_TYPE)
+	    || VOID_TYPE_P (gnu_type))
 	  {
 	    gcc_assert (type_annotate_only);
 	    if (this_global)
@@ -840,7 +840,7 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 		    if (TREE_CODE (gnu_expr) == COMPONENT_REF
 			&& TYPE_IS_PADDING_P
 			   (TREE_TYPE (TREE_OPERAND (gnu_expr, 0)))
-			&& TREE_CODE (TREE_OPERAND (gnu_expr, 0)) == VAR_DECL
+			&& VAR_P (TREE_OPERAND (gnu_expr, 0))
 			&& (TREE_READONLY (TREE_OPERAND (gnu_expr, 0))
 			    || DECL_READONLY_ONCE_ELAB
 			       (TREE_OPERAND (gnu_expr, 0))))
@@ -1077,7 +1077,7 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 		/* We need to detect the case where a temporary is created to
 		   hold the return value, since we cannot safely rename it at
 		   top level as it lives only in the elaboration routine.  */
-		|| (TREE_CODE (inner) == VAR_DECL
+		|| (VAR_P (inner)
 		    && DECL_RETURN_VALUE_P (inner))
 		/* We also need to detect the case where the front-end creates
 		   a dangling 'reference to a function call at top level and
@@ -1093,10 +1093,10 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 
 		   We cannot safely rename the rewritten expression since the
 		   underlying object lives only in the elaboration routine.  */
-		|| (TREE_CODE (inner) == INDIRECT_REF
+		|| (INDIRECT_REF_P (inner)
 		    && (inner
 			= remove_conversions (TREE_OPERAND (inner, 0), true))
-		    && TREE_CODE (inner) == VAR_DECL
+		    && VAR_P (inner)
 		    && DECL_RETURN_VALUE_P (inner)))
 	      ;
 
@@ -1611,7 +1611,7 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 	   and optimization isn't enabled, then force it in memory so that
 	   a register won't be allocated to it with possible subparts left
 	   uninitialized and reaching the register allocator.  */
-	else if (TREE_CODE (gnu_decl) == VAR_DECL
+	else if (VAR_P (gnu_decl)
 		 && !DECL_EXTERNAL (gnu_decl)
 		 && !TREE_STATIC (gnu_decl)
 		 && DECL_MODE (gnu_decl) != BLKmode
@@ -4364,7 +4364,7 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
       /* If the alignment has not already been processed and this is not
 	 an unconstrained array type, see if an alignment is specified.
 	 If not, we pick a default alignment for atomic objects.  */
-      if (align != 0 || TREE_CODE (gnu_type) == UNCONSTRAINED_ARRAY_TYPE)
+      if (align > 0 || TREE_CODE (gnu_type) == UNCONSTRAINED_ARRAY_TYPE)
 	;
       else if (Known_Alignment (gnat_entity))
 	{
@@ -4653,6 +4653,8 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
       /* If this is not an unconstrained array type, set some flags.  */
       if (TREE_CODE (gnu_type) != UNCONSTRAINED_ARRAY_TYPE)
 	{
+	  bool align_clause;
+
 	  /* Record the property that objects of tagged types are guaranteed to
 	     be properly aligned.  This is necessary because conversions to the
 	     class-wide type are translated into conversions to the root type,
@@ -4665,8 +4667,20 @@ gnat_to_gnu_entity (Entity_Id gnat_entity, tree gnu_expr, bool definition)
 	  if (is_by_ref && !VOID_TYPE_P (gnu_type))
 	    TYPE_BY_REFERENCE_P (gnu_type) = 1;
 
-	  /* Record whether an alignment clause was specified.  */
-	  if (Present (Alignment_Clause (gnat_entity)))
+	  /* Record whether an alignment clause was specified.  At this point
+	     scalar types with a non-confirming clause have been wrapped into
+	     a record type, so only scalar types with a confirming clause are
+	     left untouched; we do not set the flag on them except if they are
+	     types whose default alignment is specifically capped in order not
+	     to lose the specified alignment.  */
+	  if ((AGGREGATE_TYPE_P (gnu_type)
+	       && Present (Alignment_Clause (gnat_entity)))
+	      || (double_float_alignment > 0
+		  && is_double_float_or_array (gnat_entity, &align_clause)
+		  && align_clause)
+	      || (double_scalar_alignment > 0
+		  && is_double_scalar_or_array (gnat_entity, &align_clause)
+		  && align_clause))
 	    TYPE_USER_ALIGN (gnu_type) = 1;
 
 	  /* Record whether a pragma Universal_Aliasing was specified.  */
@@ -6703,8 +6717,7 @@ range_cannot_be_superflat (Node_Id gnat_range)
 static bool
 constructor_address_p (tree gnu_expr)
 {
-  while (TREE_CODE (gnu_expr) == NOP_EXPR
-	 || TREE_CODE (gnu_expr) == CONVERT_EXPR
+  while (CONVERT_EXPR_P (gnu_expr)
 	 || TREE_CODE (gnu_expr) == NON_LVALUE_EXPR)
     gnu_expr = TREE_OPERAND (gnu_expr, 0);
 
@@ -7047,7 +7060,7 @@ elaborate_expression_1 (tree gnu_expr, Entity_Id gnat_entity, const char *s,
 
       expr_variable_p
 	= !(inner
-	    && TREE_CODE (inner) == VAR_DECL
+	    && VAR_P (inner)
 	    && (TREE_READONLY (inner) || DECL_READONLY_ONCE_ELAB (inner)));
     }
 

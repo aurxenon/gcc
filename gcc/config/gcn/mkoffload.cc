@@ -72,10 +72,16 @@
 
 #define SET_XNACK_ON(VAR) VAR = ((VAR & ~EF_AMDGPU_FEATURE_XNACK_V4) \
 				 | EF_AMDGPU_FEATURE_XNACK_ON_V4)
+#define SET_XNACK_ANY(VAR) VAR = ((VAR & ~EF_AMDGPU_FEATURE_XNACK_V4) \
+				  | EF_AMDGPU_FEATURE_XNACK_ANY_V4)
 #define SET_XNACK_OFF(VAR) VAR = ((VAR & ~EF_AMDGPU_FEATURE_XNACK_V4) \
 				  | EF_AMDGPU_FEATURE_XNACK_OFF_V4)
-#define TEST_XNACK(VAR) ((VAR & EF_AMDGPU_FEATURE_XNACK_V4) \
-			 == EF_AMDGPU_FEATURE_XNACK_ON_V4)
+#define TEST_XNACK_ANY(VAR) ((VAR & EF_AMDGPU_FEATURE_XNACK_V4) \
+			     == EF_AMDGPU_FEATURE_XNACK_ANY_V4)
+#define TEST_XNACK_ON(VAR) ((VAR & EF_AMDGPU_FEATURE_XNACK_V4) \
+			    == EF_AMDGPU_FEATURE_XNACK_ON_V4)
+#define TEST_XNACK_OFF(VAR) ((VAR & EF_AMDGPU_FEATURE_XNACK_V4) \
+			     == EF_AMDGPU_FEATURE_XNACK_OFF_V4)
 
 #define SET_SRAM_ECC_ON(VAR) VAR = ((VAR & ~EF_AMDGPU_FEATURE_SRAMECC_V4) \
 				    | EF_AMDGPU_FEATURE_SRAMECC_ON_V4)
@@ -116,6 +122,8 @@ enum offload_abi offload_abi = OFFLOAD_ABI_UNSET;
 uint32_t elf_arch = EF_AMDGPU_MACH_AMDGCN_GFX803;  // Default GPU architecture.
 uint32_t elf_flags =
     (EF_AMDGPU_FEATURE_XNACK_ANY_V4 | EF_AMDGPU_FEATURE_SRAMECC_ANY_V4);
+
+static int gcn_stack_size = 0;  /* Zero means use default.  */
 
 /* Delete tempfiles.  */
 
@@ -662,6 +670,18 @@ process_asm (FILE *in, FILE *out, FILE *cfile)
     }
   fprintf (cfile, "\n};\n\n");
 
+  /* Set the stack size if the user configured a value.  */
+  if (gcn_stack_size)
+    fprintf (cfile,
+	     "static __attribute__((constructor))\n"
+	     "void configure_stack_size (void)\n"
+	     "{\n"
+	     "  const char *val = getenv (\"GCN_STACK_SIZE\");\n"
+	     "  if (!val || val[0] == '\\0')\n"
+	     "    setenv (\"GCN_STACK_SIZE\", \"%d\", true);\n"
+	     "}\n\n",
+	     gcn_stack_size);
+
   obstack_free (&fns_os, NULL);
   for (i = 0; i < dims_count; i++)
     free (dims[i].name);
@@ -893,9 +913,11 @@ main (int argc, char **argv)
 	fPIC = true;
       else if (strcmp (argv[i], "-fpic") == 0)
 	fpic = true;
-      else if (strcmp (argv[i], "-mxnack") == 0)
+      else if (strcmp (argv[i], "-mxnack=on") == 0)
 	SET_XNACK_ON (elf_flags);
-      else if (strcmp (argv[i], "-mno-xnack") == 0)
+      else if (strcmp (argv[i], "-mxnack=any") == 0)
+	SET_XNACK_ANY (elf_flags);
+      else if (strcmp (argv[i], "-mxnack=off") == 0)
 	SET_XNACK_OFF (elf_flags);
       else if (strcmp (argv[i], "-msram-ecc=on") == 0)
 	SET_SRAM_ECC_ON (elf_flags);
@@ -920,6 +942,10 @@ main (int argc, char **argv)
 	elf_arch = EF_AMDGPU_MACH_AMDGCN_GFX908;
       else if (strcmp (argv[i], "-march=gfx90a") == 0)
 	elf_arch = EF_AMDGPU_MACH_AMDGCN_GFX90a;
+#define STR "-mstack-size="
+      else if (startswith (argv[i], STR))
+	gcn_stack_size = atoi (argv[i] + strlen (STR));
+#undef STR
     }
 
   if (!(fopenacc ^ fopenmp))
@@ -1055,14 +1081,18 @@ main (int argc, char **argv)
       obstack_ptr_grow (&ld_argv_obstack, gcn_s2_name);
       obstack_ptr_grow (&ld_argv_obstack, "-lgomp");
       obstack_ptr_grow (&ld_argv_obstack,
-			(TEST_XNACK (elf_flags)
-			 ? "-mxnack" : "-mno-xnack"));
+			(TEST_XNACK_ON (elf_flags) ? "-mxnack=on"
+			 : TEST_XNACK_ANY (elf_flags) ? "-mxnack=any"
+			 : "-mxnack=off"));
       obstack_ptr_grow (&ld_argv_obstack,
 			(TEST_SRAM_ECC_ON (elf_flags) ? "-msram-ecc=on"
 			 : TEST_SRAM_ECC_ANY (elf_flags) ? "-msram-ecc=any"
 			 : "-msram-ecc=off"));
       if (verbose)
 	obstack_ptr_grow (&ld_argv_obstack, "-v");
+
+      if (save_temps)
+	obstack_ptr_grow (&ld_argv_obstack, "-save-temps");
 
       for (int i = 1; i < argc; i++)
 	if (startswith (argv[i], "-l")

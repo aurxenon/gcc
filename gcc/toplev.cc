@@ -323,7 +323,7 @@ wrapup_global_declaration_1 (tree decl)
 {
   /* We're not deferring this any longer.  Assignment is conditional to
      avoid needlessly dirtying PCH pages.  */
-  if (CODE_CONTAINS_STRUCT (TREE_CODE (decl), TS_DECL_WITH_VIS)
+  if (HAS_DECL_ASSEMBLER_NAME_P (decl)
       && DECL_DEFER_OUTPUT (decl) != 0)
     DECL_DEFER_OUTPUT (decl) = 0;
 
@@ -829,7 +829,8 @@ output_stack_usage_1 (FILE *cf)
   if (stack_usage_file)
     {
       print_decl_identifier (stack_usage_file, current_function_decl,
-			     PRINT_DECL_ORIGIN | PRINT_DECL_NAME);
+			     PRINT_DECL_ORIGIN | PRINT_DECL_NAME
+			     | PRINT_DECL_REMAP_DEBUG);
       fprintf (stack_usage_file, "\t" HOST_WIDE_INT_PRINT_DEC"\t%s\n",
 	       stack_usage, stack_usage_kind_str[stack_usage_kind]);
     }
@@ -1358,7 +1359,7 @@ process_options (bool no_backend)
      option flags in use.  */
   if (version_flag)
     {
-      print_version (stderr, "", true);
+      /* We already printed the version header in main ().  */
       if (!quiet_flag)
 	{
 	  fputs ("options passed: ", stderr);
@@ -1580,7 +1581,7 @@ process_options (bool no_backend)
   if (flag_stack_check != NO_STACK_CHECK && flag_stack_clash_protection)
     {
       warning_at (UNKNOWN_LOCATION, 0,
-		  "%<-fstack-check=%> and %<-fstack-clash_protection%> are "
+		  "%<-fstack-check=%> and %<-fstack-clash-protection%> are "
 		  "mutually exclusive; disabling %<-fstack-check=%>");
       flag_stack_check = NO_STACK_CHECK;
     }
@@ -2251,6 +2252,10 @@ toplev::main (int argc, char **argv)
   init_local_tick ();
 
   initialize_plugins ();
+
+  /* Handle the dump options now that plugins have had a chance to install new
+     passes.  */
+  handle_deferred_dump_options ();
 
   if (version_flag)
     print_version (stderr, "", true);

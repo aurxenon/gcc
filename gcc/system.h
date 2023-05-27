@@ -701,6 +701,28 @@ extern int vsnprintf (char *, size_t, const char *, va_list);
 /* Do not introduce a gmp.h dependency on the build system.  */
 #ifndef GENERATOR_FILE
 #include <gmp.h>
+
+class auto_mpz
+{
+public:
+  auto_mpz () { mpz_init (m_mpz); }
+  ~auto_mpz () { mpz_clear (m_mpz); }
+
+  operator mpz_t& () { return m_mpz; }
+  mpz_ptr operator-> () { return m_mpz; }
+
+  auto_mpz (const auto_mpz &) = delete;
+  auto_mpz &operator= (const auto_mpz &) = delete;
+
+#if GCC_VERSION < 4008 || GCC_VERSION >= 5000
+  /* GCC 4.8 and 4.9 don't support this, only fixed in PR62101 for 5.0.  */
+  friend void mpz_clear (auto_mpz&) = delete;
+  friend void mpz_init (auto_mpz&) = delete;
+#endif
+
+private:
+  mpz_t m_mpz;
+};
 #endif
 
 /* Get libiberty declarations.  */
@@ -751,14 +773,14 @@ extern int vsnprintf (char *, size_t, const char *, va_list);
 # include <mutex>
 #endif
 
+#ifdef INCLUDE_SSTREAM
+# include <sstream>
+#endif
+
 #ifdef INCLUDE_MALLOC_H
 #if defined(HAVE_MALLINFO) || defined(HAVE_MALLINFO2)
 #include <malloc.h>
 #endif
-#endif
-
-#ifdef INCLUDE_PTHREAD_H
-#include <pthread.h>
 #endif
 
 #ifdef INCLUDE_ISL
@@ -1166,7 +1188,7 @@ extern void fancy_abort (const char *, int, const char *)
    so does GCC 3.4.x (PR17436).  */
 #define CONST_CAST2(TOTYPE,FROMTYPE,X) ((__extension__(union {FROMTYPE _q; TOTYPE _nq;})(X))._nq)
 #elif defined(__GNUC__)
-static inline char *
+inline char *
 helper_const_non_const_cast (const char *p)
 {
   union {
@@ -1308,7 +1330,7 @@ void gcc_stablesort_r (void *, size_t, size_t, sort_r_cmp_fn *, void *data);
 
 /* Return true if STR string starts with PREFIX.  */
 
-static inline bool
+inline bool
 startswith (const char *str, const char *prefix)
 {
   return strncmp (str, prefix, strlen (prefix)) == 0;
@@ -1316,7 +1338,7 @@ startswith (const char *str, const char *prefix)
 
 /* Return true if STR string ends with SUFFIX.  */
 
-static inline bool
+inline bool
 endswith (const char *str, const char *suffix)
 {
   size_t str_len = strlen (str);

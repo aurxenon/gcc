@@ -4112,7 +4112,7 @@ gfc_conv_intrinsic_minmax (gfc_se * se, gfc_expr * expr, enum tree_code op)
       /* Handle absent optional arguments by ignoring the comparison.  */
       if (argexpr->expr->expr_type == EXPR_VARIABLE
 	  && argexpr->expr->symtree->n.sym->attr.optional
-	  && TREE_CODE (val) == INDIRECT_REF)
+	  && INDIRECT_REF_P (val))
 	{
 	  cond = fold_build2_loc (input_location,
 				NE_EXPR, logical_type_node,
@@ -4126,7 +4126,7 @@ gfc_conv_intrinsic_minmax (gfc_se * se, gfc_expr * expr, enum tree_code op)
       tree calc;
       /* For floating point types, the question is what MAX(a, NaN) or
 	 MIN(a, NaN) should return (where "a" is a normal number).
-	 There are valid usecase for returning either one, but the
+	 There are valid use case for returning either one, but the
 	 Fortran standard doesn't specify which one should be chosen.
 	 Also, there is no consensus among other tested compilers.  In
 	 short, it's a mess.  So lets just do whatever is fastest.  */
@@ -6638,6 +6638,7 @@ gfc_conv_intrinsic_ibits (gfc_se * se, gfc_expr * expr)
   tree type;
   tree tmp;
   tree mask;
+  tree num_bits, cond;
 
   gfc_conv_intrinsic_function_args (se, expr, args, 3);
   type = TREE_TYPE (args[0]);
@@ -6678,8 +6679,17 @@ gfc_conv_intrinsic_ibits (gfc_se * se, gfc_expr * expr)
 			       "in intrinsic IBITS", tmp1, tmp2, nbits);
     }
 
+  /* The Fortran standard allows (shift width) LEN <= BIT_SIZE(I), whereas
+     gcc requires a shift width < BIT_SIZE(I), so we have to catch this
+     special case.  See also gfc_conv_intrinsic_ishft ().  */
+  num_bits = build_int_cst (TREE_TYPE (args[2]), TYPE_PRECISION (type));
+
   mask = build_int_cst (type, -1);
   mask = fold_build2_loc (input_location, LSHIFT_EXPR, type, mask, args[2]);
+  cond = fold_build2_loc (input_location, GE_EXPR, logical_type_node, args[2],
+			  num_bits);
+  mask = fold_build3_loc (input_location, COND_EXPR, type, cond,
+			  build_int_cst (type, 0), mask);
   mask = fold_build1_loc (input_location, BIT_NOT_EXPR, type, mask);
 
   tmp = fold_build2_loc (input_location, RSHIFT_EXPR, type, args[0], args[1]);
@@ -10145,7 +10155,7 @@ conv_intrinsic_ieee_value (gfc_se *se, gfc_expr *expr)
   arg = gfc_evaluate_now (arg, &se->pre);
 
   type = gfc_typenode_for_spec (&expr->ts);
-  gcc_assert (TREE_CODE (type) == REAL_TYPE);
+  gcc_assert (SCALAR_FLOAT_TYPE_P (type));
   ret = gfc_create_var (type, NULL);
 
   gfc_init_block (&body);

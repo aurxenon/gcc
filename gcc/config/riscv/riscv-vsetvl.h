@@ -31,6 +31,7 @@ enum vsetvl_type
   VSETVL_NORMAL,
   VSETVL_VTYPE_CHANGE_ONLY,
   VSETVL_DISCARD_RESULT,
+  NUM_VSETVL_TYPE
 };
 
 enum emit_type
@@ -47,9 +48,18 @@ enum demand_type
   DEMAND_SEW,
   DEMAND_LMUL,
   DEMAND_RATIO,
+  DEMAND_NONZERO_AVL,
+  DEMAND_GE_SEW,
   DEMAND_TAIL_POLICY,
   DEMAND_MASK_POLICY,
   NUM_DEMAND
+};
+
+enum demand_status
+{
+  DEMAND_FALSE,
+  DEMAND_TRUE,
+  DEMAND_ANY,
 };
 
 enum fusion_type
@@ -63,6 +73,21 @@ enum merge_type
 {
   LOCAL_MERGE,
   GLOBAL_MERGE
+};
+
+enum def_type
+{
+  REAL_SET = 1 << 0,
+  PHI_SET = 1 << 1,
+  BB_HEAD_SET = 1 << 2,
+  BB_END_SET = 1 << 3,
+  /* ??? TODO: In RTL_SSA framework, we have REAL_SET,
+     PHI_SET, BB_HEAD_SET, BB_END_SET and
+     CLOBBER_DEF def_info types. Currently,
+     we conservatively do not optimize clobber
+     def since we don't see the case that we
+     need to optimize it.  */
+  CLOBBER_DEF = 1 << 4
 };
 
 /* AVL info for RVV instruction. Most RVV instructions have AVL operand in
@@ -143,9 +168,18 @@ public:
   rtx get_value () const { return m_value; }
   rtl_ssa::set_info *get_source () const { return m_source; }
   bool single_source_equal_p (const avl_info &) const;
+  bool multiple_source_equal_p (const avl_info &) const;
   avl_info &operator= (const avl_info &);
   bool operator== (const avl_info &) const;
   bool operator!= (const avl_info &) const;
+
+  bool has_avl_imm () const
+  {
+    return get_value () && CONST_INT_P (get_value ());
+  }
+  bool has_avl_reg () const { return get_value () && REG_P (get_value ()); }
+  bool has_avl_no_reg () const { return !get_value (); }
+  bool has_non_zero_avl () const;
 };
 
 /* Basic structure to save VL/VTYPE information.  */
@@ -181,10 +215,10 @@ public:
   bool operator== (const vl_vtype_info &) const;
   bool operator!= (const vl_vtype_info &) const;
 
-  bool has_avl_imm () const { return get_avl () && CONST_INT_P (get_avl ()); }
-  bool has_avl_reg () const { return get_avl () && REG_P (get_avl ()); }
-  bool has_avl_no_reg () const { return !get_avl (); }
-  bool has_non_zero_avl () const;
+  bool has_avl_imm () const { return m_avl.has_avl_imm (); }
+  bool has_avl_reg () const { return m_avl.has_avl_reg (); }
+  bool has_avl_no_reg () const { return m_avl.has_avl_no_reg (); }
+  bool has_non_zero_avl () const { return m_avl.has_non_zero_avl (); };
 
   rtx get_avl () const { return m_avl.get_value (); }
   const avl_info &get_avl_info () const { return m_avl; }
@@ -210,6 +244,8 @@ private:
     VALID,
     UNKNOWN,
     EMPTY,
+    /* The empty block can not be polluted as dirty.  */
+    HARD_EMPTY,
 
     /* The block is polluted as containing VSETVL instruction during dem
        backward propagation to gain better LCM optimization even though
@@ -260,9 +296,6 @@ private:
      Since RTL_SSA can not be enabled when optimize == 0, we don't initialize
      the m_insn.  */
   void parse_insn (rtx_insn *);
-  /* This is only called by lazy_vsetvl subroutine when optimize > 0.
-     We use RTL_SSA framework to initialize the insn_info.  */
-  void parse_insn (rtl_ssa::insn_info *);
 
   friend class vector_infos_manager;
 
@@ -272,14 +305,18 @@ public:
       m_insn (nullptr)
   {}
 
-  bool operator> (const vector_insn_info &) const;
+  /* This is only called by lazy_vsetvl subroutine when optimize > 0.
+     We use RTL_SSA framework to initialize the insn_info.  */
+  void parse_insn (rtl_ssa::insn_info *);
+
   bool operator>= (const vector_insn_info &) const;
   bool operator== (const vector_insn_info &) const;
 
   bool uninit_p () const { return m_state == UNINITIALIZED; }
   bool valid_p () const { return m_state == VALID; }
   bool unknown_p () const { return m_state == UNKNOWN; }
-  bool empty_p () const { return m_state == EMPTY; }
+  bool empty_p () const { return m_state == EMPTY || m_state == HARD_EMPTY; }
+  bool hard_empty_p () const { return m_state == HARD_EMPTY; }
   bool dirty_p () const
   {
     return m_state == DIRTY || m_state == DIRTY_WITH_KILLED_AVL;
@@ -294,6 +331,7 @@ public:
     return m_state == VALID || m_state == DIRTY
 	   || m_state == DIRTY_WITH_KILLED_AVL;
   }
+  bool available_p (const vector_insn_info &) const;
 
   static vector_insn_info get_unknown ()
   {
@@ -302,9 +340,17 @@ public:
     return info;
   }
 
+  static vector_insn_info get_hard_empty ()
+  {
+    vector_insn_info info;
+    info.set_hard_empty ();
+    return info;
+  }
+
   void set_valid () { m_state = VALID; }
   void set_unknown () { m_state = UNKNOWN; }
   void set_empty () { m_state = EMPTY; }
+  void set_hard_empty () { m_state = HARD_EMPTY; }
   void set_dirty (enum fusion_type type)
   {
     gcc_assert (type == VALID_AVL_FUSION || type == KILLED_AVL_FUSION);
@@ -324,10 +370,17 @@ public:
 
   bool demand_p (enum demand_type type) const { return m_demands[type]; }
   void demand (enum demand_type type) { m_demands[type] = true; }
-  void demand_vl_vtype ();
-  void undemand (enum demand_type type) { m_demands[type] = false; }
+  void set_demand (enum demand_type type, bool value)
+  {
+    m_demands[type] = value;
+  }
+  void fuse_avl (const vector_insn_info &, const vector_insn_info &);
+  void fuse_sew_lmul (const vector_insn_info &, const vector_insn_info &);
+  void fuse_tail_policy (const vector_insn_info &, const vector_insn_info &);
+  void fuse_mask_policy (const vector_insn_info &, const vector_insn_info &);
 
   bool compatible_p (const vector_insn_info &) const;
+  bool skip_avl_compatible_p (const vector_insn_info &) const;
   bool compatible_avl_p (const vl_vtype_info &) const;
   bool compatible_avl_p (const avl_info &) const;
   bool compatible_vtype_p (const vl_vtype_info &) const;
@@ -335,6 +388,12 @@ public:
   vector_insn_info merge (const vector_insn_info &, enum merge_type) const;
 
   rtl_ssa::insn_info *get_insn () const { return m_insn; }
+  const bool *get_demands (void) const { return m_demands; }
+  rtx get_avl_reg_rtx (void) const
+  {
+    return gen_rtx_REG (Pmode, get_avl_source ()->regno ());
+  }
+  bool update_fault_first_load_avl (rtl_ssa::insn_info *);
 
   void dump (FILE *) const;
 };
@@ -359,6 +418,8 @@ public:
   auto_vec<vector_insn_info> vector_insn_infos;
   auto_vec<vector_block_info> vector_block_infos;
   auto_vec<vector_insn_info *> vector_exprs;
+  hash_set<rtx_insn *> to_refine_vsetvls;
+  hash_set<rtx_insn *> to_delete_vsetvls;
 
   struct edge_list *vector_edge_list;
   sbitmap *vector_kill;
@@ -390,11 +451,66 @@ public:
   /* Return true if all expression set in bitmap are same ratio.  */
   bool all_same_ratio_p (sbitmap) const;
 
+  bool all_empty_predecessor_p (const basic_block) const;
+  bool all_avail_in_compatible_p (const basic_block) const;
+
   void release (void);
   void create_bitmap_vectors (void);
   void free_bitmap_vectors (void);
 
   void dump (FILE *) const;
+};
+
+struct demands_pair
+{
+  demand_status first[NUM_DEMAND];
+  demand_status second[NUM_DEMAND];
+  bool match_cond_p (const bool *dems1, const bool *dems2) const
+  {
+    for (unsigned i = 0; i < NUM_DEMAND; i++)
+      {
+	if (first[i] != DEMAND_ANY && first[i] != dems1[i])
+	  return false;
+	if (second[i] != DEMAND_ANY && second[i] != dems2[i])
+	  return false;
+      }
+    return true;
+  }
+};
+
+struct demands_cond
+{
+  demands_pair pair;
+  using CONDITION_TYPE
+    = bool (*) (const vector_insn_info &, const vector_insn_info &);
+  CONDITION_TYPE incompatible_p;
+  bool dual_incompatible_p (const vector_insn_info &info1,
+			    const vector_insn_info &info2) const
+  {
+    return ((pair.match_cond_p (info1.get_demands (), info2.get_demands ())
+	     && incompatible_p (info1, info2))
+	    || (pair.match_cond_p (info2.get_demands (), info1.get_demands ())
+		&& incompatible_p (info2, info1)));
+  }
+};
+
+struct demands_fuse_rule
+{
+  demands_pair pair;
+  bool demand_sew_p;
+  bool demand_lmul_p;
+  bool demand_ratio_p;
+  bool demand_ge_sew_p;
+
+  using NEW_SEW
+    = unsigned (*) (const vector_insn_info &, const vector_insn_info &);
+  using NEW_VLMUL
+    = vlmul_type (*) (const vector_insn_info &, const vector_insn_info &);
+  using NEW_RATIO
+    = unsigned (*) (const vector_insn_info &, const vector_insn_info &);
+  NEW_SEW new_sew;
+  NEW_VLMUL new_vlmul;
+  NEW_RATIO new_ratio;
 };
 
 } // namespace riscv_vector

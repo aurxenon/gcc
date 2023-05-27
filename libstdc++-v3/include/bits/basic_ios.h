@@ -66,6 +66,10 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
   template<typename _CharT, typename _Traits>
     class basic_ios : public ios_base
     {
+#if __cplusplus >= 202002L
+      static_assert(is_same_v<_CharT, typename _Traits::char_type>);
+#endif
+
     public:
       ///@{
       /**
@@ -157,9 +161,9 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       setstate(iostate __state)
       { this->clear(this->rdstate() | __state); }
 
-      // Flip the internal state on for the proper state bits, then
+      // Flips the internal state on for the proper state bits, then
       // rethrows the propagated exception if bit also set in
-      // exceptions().
+      // exceptions(). Must only be called within a catch handler.
       void
       _M_setstate(iostate __state)
       {

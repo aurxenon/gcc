@@ -1074,6 +1074,7 @@ c_cpp_builtins (cpp_reader *pfile)
 	  /* Set feature test macros for C++23.  */
 	  cpp_define (pfile, "__cpp_size_t_suffix=202011L");
 	  cpp_define (pfile, "__cpp_if_consteval=202106L");
+	  cpp_define (pfile, "__cpp_auto_cast=202110L");
 	  cpp_define (pfile, "__cpp_constexpr=202211L");
 	  cpp_define (pfile, "__cpp_multidimensional_subscript=202211L");
 	  cpp_define (pfile, "__cpp_named_character_escapes=202207L");
@@ -1903,6 +1904,8 @@ type_suffix (tree type)
 	      systems use it anyway.  */
 	   || type == char_type_node)
     is_long = 0;
+  else if (type == wchar_type_node)
+    return type_suffix (underlying_wchar_type_node);
   else
     gcc_unreachable ();
 

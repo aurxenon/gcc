@@ -842,7 +842,7 @@ proper position among the other output files.  */
 #define LINK_COMPRESS_DEBUG_SPEC \
 	" %{gz|gz=zlib:"  LD_COMPRESS_DEBUG_OPTION "=zlib}" \
 	" %{gz=none:"	  LD_COMPRESS_DEBUG_OPTION "=none}" \
-	" %{gz*:%e-gz=zstd is not supported in this configuration} " \
+	" %{gz=zstd:%e-gz=zstd is not supported in this configuration} " \
 	" %{gz=zlib-gnu:}" /* Ignore silently zlib-gnu option value.  */
 #elif HAVE_LD_COMPRESS_DEBUG == 2
 /* ELF gABI style and ZSTD.  */
@@ -1454,13 +1454,13 @@ static const struct compiler default_compilers[] =
 		    cc1 -fpreprocessed %{save-temps*:%b.i} %{!save-temps*:%g.i} \
 			%(cc1_options)\
 			%{!fsyntax-only:%{!S:-o %g.s} \
-			    %{!fdump-ada-spec*:%{!o*:--output-pch %i.gch}\
-					       %W{o*:--output-pch %*}}%V}}\
+			    %{!fdump-ada-spec*:%{!o*:--output-pch %w%i.gch}\
+					       %W{o*:--output-pch %w%*}}%{!S:%V}}}\
 	  %{!save-temps*:%{!traditional-cpp:%{!no-integrated-cpp:\
 		cc1 %(cpp_unique_options) %(cc1_options)\
 		    %{!fsyntax-only:%{!S:-o %g.s} \
-		        %{!fdump-ada-spec*:%{!o*:--output-pch %i.gch}\
-					   %W{o*:--output-pch %*}}%V}}}}}}}", 0, 0, 0},
+		        %{!fdump-ada-spec*:%{!o*:--output-pch %w%i.gch}\
+					   %W{o*:--output-pch %w%*}}%{!S:%V}}}}}}}}", 0, 0, 0},
   {".i", "@cpp-output", 0, 0, 0},
   {"@cpp-output",
    "%{!M:%{!MM:%{!E:cc1 -fpreprocessed %i %(cc1_options) %{!fsyntax-only:%(invoke_as)}}}}", 0, 0, 0},
@@ -4291,9 +4291,13 @@ driver_handle_option (struct gcc_options *opts,
       break;
 
     case OPT_fdiagnostics_format_:
-      diagnostic_output_format_init (dc, opts->x_dump_base_name,
-				     (enum diagnostics_output_format)value);
-      break;
+	{
+	  const char *basename = (opts->x_dump_base_name ? opts->x_dump_base_name
+				  : opts->x_main_input_basename);
+	  diagnostic_output_format_init (dc, basename,
+					 (enum diagnostics_output_format)value);
+	  break;
+	}
 
     case OPT_Wa_:
       {
@@ -4566,6 +4570,10 @@ driver_handle_option (struct gcc_options *opts,
 	save_switch (concat ("-foffload-options=", arg, NULL),
 		     0, NULL, validated, true);
       do_save = false;
+      break;
+
+    case OPT_gcodeview:
+      add_infile ("--pdb=", "*");
       break;
 
     default:

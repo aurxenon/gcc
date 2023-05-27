@@ -327,17 +327,22 @@ mark_stmt_if_obviously_necessary (gimple *stmt, bool aggressive)
 
 /* Mark the last statement of BB as necessary.  */
 
-static void
+static bool
 mark_last_stmt_necessary (basic_block bb)
 {
-  gimple *stmt = last_stmt (bb);
+  if (!bitmap_set_bit (last_stmt_necessary, bb->index))
+    return true;
 
-  bitmap_set_bit (last_stmt_necessary, bb->index);
   bitmap_set_bit (bb_contains_live_stmts, bb->index);
 
   /* We actually mark the statement only if it is a control statement.  */
+  gimple *stmt = *gsi_last_bb (bb);
   if (stmt && is_ctrl_stmt (stmt))
-    mark_stmt_necessary (stmt, true);
+    {
+      mark_stmt_necessary (stmt, true);
+      return true;
+    }
+  return false;
 }
 
 
@@ -369,8 +374,8 @@ mark_control_dependent_edges_necessary (basic_block bb, bool ignore_self)
 	  continue;
 	}
 
-      if (!bitmap_bit_p (last_stmt_necessary, cd_bb->index))
-	mark_last_stmt_necessary (cd_bb);
+      if (!mark_last_stmt_necessary (cd_bb))
+	mark_control_dependent_edges_necessary (cd_bb, false);
     }
 
   if (!skipped)
@@ -790,8 +795,8 @@ propagate_necessity (bool aggressive)
 		  if (gimple_bb (stmt)
 		      != get_immediate_dominator (CDI_POST_DOMINATORS, arg_bb))
 		    {
-		      if (!bitmap_bit_p (last_stmt_necessary, arg_bb->index))
-			mark_last_stmt_necessary (arg_bb);
+		      if (!mark_last_stmt_necessary (arg_bb))
+			mark_control_dependent_edges_necessary (arg_bb, false);
 		    }
 		  else if (arg_bb != ENTRY_BLOCK_PTR_FOR_FN (cfun)
 		           && !bitmap_bit_p (visited_control_parents,
@@ -1089,7 +1094,7 @@ remove_dead_stmt (gimple_stmt_iterator *i, basic_block bb,
      nothing to the program, then we not only remove it, but we need to update
      the CFG.  We can chose any of edges out of BB as long as we are sure to not
      close infinite loops.  This is done by always choosing the edge closer to
-     exit in inverted_post_order_compute order.  */
+     exit in inverted_rev_post_order_compute order.  */
   if (is_ctrl_stmt (stmt))
     {
       edge_iterator ei;
@@ -1105,17 +1110,18 @@ remove_dead_stmt (gimple_stmt_iterator *i, basic_block bb,
 	{
 	  if (!bb_postorder)
 	    {
-	      auto_vec<int, 20> postorder;
-		 inverted_post_order_compute (&postorder,
-					      &bb_contains_live_stmts);
+	      int *rpo = XNEWVEC (int, n_basic_blocks_for_fn (cfun));
+	      int n = inverted_rev_post_order_compute (cfun, rpo,
+						       &bb_contains_live_stmts);
 	      bb_postorder = XNEWVEC (int, last_basic_block_for_fn (cfun));
-	      for (unsigned int i = 0; i < postorder.length (); ++i)
-		 bb_postorder[postorder[i]] = i;
+	      for (int i = 0; i < n; ++i)
+		 bb_postorder[rpo[i]] = i;
+	      free (rpo);
 	    }
           FOR_EACH_EDGE (e2, ei, bb->succs)
 	    if (!e || e2->dest == EXIT_BLOCK_PTR_FOR_FN (cfun)
 		|| bb_postorder [e->dest->index]
-		   < bb_postorder [e2->dest->index])
+		   >= bb_postorder [e2->dest->index])
 	      e = e2;
 	}
       gcc_assert (e);
@@ -1506,15 +1512,17 @@ eliminate_unnecessary_stmts (bool aggressive)
 	remove_edge (to_remove_edges[i]);
       cfg_altered = true;
     }
-  /* When we cleared calls_setjmp we can purge all abnormal edges.  Do so.  */
-  if (cfun->calls_setjmp != had_setjmp)
+  /* When we cleared calls_setjmp we can purge all abnormal edges.  Do so.
+     ???  We'd like to assert that setjmp calls do not pop out of nothing
+     but we currently lack a per-stmt way of noting whether a call was
+     recognized as returns-twice (or rather receives-control).  */
+  if (!cfun->calls_setjmp && had_setjmp)
     {
-      gcc_assert (!cfun->calls_setjmp);
       /* Make sure we only remove the edges, not dominated blocks.  Using
 	 gimple_purge_dead_abnormal_call_edges would do that and we
 	 cannot free dominators yet.  */
       FOR_EACH_BB_FN (bb, cfun)
-	if (gcall *stmt = safe_dyn_cast <gcall *> (last_stmt (bb)))
+	if (gcall *stmt = safe_dyn_cast <gcall *> (*gsi_last_bb (bb)))
 	  if (!stmt_can_make_abnormal_goto (stmt))
 	    {
 	      edge_iterator ei;
@@ -2089,18 +2097,45 @@ make_pass_cd_dce (gcc::context *ctxt)
    use operands number.  */
 
 void
-simple_dce_from_worklist (bitmap worklist)
+simple_dce_from_worklist (bitmap worklist, bitmap need_eh_cleanup)
 {
+  int phiremoved = 0;
+  int stmtremoved = 0;
   while (! bitmap_empty_p (worklist))
     {
       /* Pop item.  */
-      unsigned i = bitmap_first_set_bit (worklist);
-      bitmap_clear_bit (worklist, i);
+      unsigned i = bitmap_clear_first_set_bit (worklist);
 
       tree def = ssa_name (i);
-      /* Removed by somebody else or still in use.  */
-      if (! def || ! has_zero_uses (def))
+      /* Removed by somebody else or still in use.
+	 Note use in itself for a phi node is not counted as still in use.  */
+      if (!def)
 	continue;
+      if (!has_zero_uses (def))
+	{
+	  gimple *def_stmt = SSA_NAME_DEF_STMT (def);
+
+	  if (gimple_code (def_stmt) != GIMPLE_PHI)
+	    continue;
+
+	  gimple *use_stmt;
+	  imm_use_iterator use_iter;
+	  bool canremove = true;
+
+	  FOR_EACH_IMM_USE_STMT (use_stmt, use_iter, def)
+	    {
+	      /* Ignore debug statements. */
+	      if (is_gimple_debug (use_stmt))
+		continue;
+	      if (use_stmt != def_stmt)
+		{
+		  canremove = false;
+		  break;
+		}
+	    }
+	  if (!canremove)
+	    continue;
+	}
 
       gimple *t = SSA_NAME_DEF_STMT (def);
       if (gimple_has_side_effects (t))
@@ -2108,15 +2143,20 @@ simple_dce_from_worklist (bitmap worklist)
 
       /* The defining statement needs to be defining only this name.
 	 ASM is the only statement that can define more than one
-	 (non-virtual) name. */
+	 name. */
       if (is_a<gasm *>(t)
-	  && !single_ssa_def_operand (t, SSA_OP_DEF))
+	  && !single_ssa_def_operand (t, SSA_OP_ALL_DEFS))
 	continue;
 
       /* Don't remove statements that are needed for non-call
 	 eh to work.  */
       if (stmt_unremovable_because_of_non_call_eh_p (cfun, t))
 	continue;
+
+      /* Tell the caller that we removed a statement that might
+	 throw so it could cleanup the cfg for that block. */
+      if (need_eh_cleanup && stmt_could_throw_p (cfun, t))
+	bitmap_set_bit (need_eh_cleanup, gimple_bb (t)->index);
 
       /* Add uses to the worklist.  */
       ssa_op_iter iter;
@@ -2137,11 +2177,20 @@ simple_dce_from_worklist (bitmap worklist)
 	}
       gimple_stmt_iterator gsi = gsi_for_stmt (t);
       if (gimple_code (t) == GIMPLE_PHI)
-	remove_phi_node (&gsi, true);
+	{
+	  remove_phi_node (&gsi, true);
+	  phiremoved++;
+	}
       else
 	{
+	  unlink_stmt_vdef (t);
 	  gsi_remove (&gsi, true);
 	  release_defs (t);
+	  stmtremoved++;
 	}
     }
+  statistics_counter_event (cfun, "PHIs removed",
+			    phiremoved);
+  statistics_counter_event (cfun, "Statements removed",
+			    stmtremoved);
 }

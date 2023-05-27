@@ -63,6 +63,8 @@ enum rtx_code  {
 # define NON_GENERATOR_NUM_RTX_CODE ((int) MATCH_OPERAND)
 #endif
 
+#define RTX_CODE_BITSIZE 8
+
 /* Register Transfer Language EXPRESSIONS CODE CLASSES */
 
 enum rtx_class  {
@@ -309,11 +311,11 @@ struct GTY((variable_size)) const_poly_int_def {
 struct GTY((desc("0"), tag("0"),
 	    chain_next ("RTX_NEXT (&%h)"),
 	    chain_prev ("RTX_PREV (&%h)"))) rtx_def {
-  /* The kind of expression this is.  */
-  ENUM_BITFIELD(rtx_code) code: 16;
-
   /* The kind of value the expression has.  */
-  ENUM_BITFIELD(machine_mode) mode : 8;
+  ENUM_BITFIELD(machine_mode) mode : MACHINE_MODE_BITSIZE;
+
+  /* The kind of expression this is.  */
+  ENUM_BITFIELD(rtx_code) code: RTX_CODE_BITSIZE;
 
   /* 1 in a MEM if we should keep the alias set for this mem unchanged
      when we access a component.
@@ -1895,7 +1897,7 @@ inline void rtx_jump_insn::set_jump_target (rtx_code_label *target)
 #define LABEL_REFS(LABEL) XCEXP (LABEL, 3, CODE_LABEL)
 
 /* Get the label that a LABEL_REF references.  */
-static inline rtx_insn *
+inline rtx_insn *
 label_ref_label (const_rtx ref)
 {
   return as_a<rtx_insn *> (XCEXP (ref, 0, LABEL_REF));
@@ -1903,7 +1905,7 @@ label_ref_label (const_rtx ref)
 
 /* Set the label that LABEL_REF ref refers to.  */
 
-static inline void
+inline void
 set_label_ref_label (rtx ref, rtx_insn *label)
 {
   XCEXP (ref, 0, LABEL_REF) = label;
@@ -1926,14 +1928,14 @@ set_label_ref_label (rtx ref, rtx_insn *label)
   (RTL_FLAG_CHECK1 ("ORIGINAL_REGNO", (RTX), REG)->u2.original_regno)
 
 /* Force the REGNO macro to only be used on the lhs.  */
-static inline unsigned int
+inline unsigned int
 rhs_regno (const_rtx x)
 {
   return REG_CHECK (x)->regno;
 }
 
 /* Return the final register in REG X plus one.  */
-static inline unsigned int
+inline unsigned int
 END_REGNO (const_rtx x)
 {
   return REGNO (x) + REG_NREGS (x);
@@ -1941,7 +1943,7 @@ END_REGNO (const_rtx x)
 
 /* Change the REGNO and REG_NREGS of REG X to the specified values,
    bypassing the df machinery.  */
-static inline void
+inline void
 set_regno_raw (rtx x, unsigned int regno, unsigned int nregs)
 {
   reg_info *reg = REG_CHECK (x);
@@ -1967,10 +1969,17 @@ set_regno_raw (rtx x, unsigned int regno, unsigned int nregs)
   (RTL_FLAG_CHECK1 ("MEM_POINTER", (RTX), MEM)->frame_related)
 
 /* 1 if the given register REG corresponds to a hard register.  */
-#define HARD_REGISTER_P(REG) (HARD_REGISTER_NUM_P (REGNO (REG)))
+#define HARD_REGISTER_P(REG) HARD_REGISTER_NUM_P (REGNO (REG))
 
 /* 1 if the given register number REG_NO corresponds to a hard register.  */
 #define HARD_REGISTER_NUM_P(REG_NO) ((REG_NO) < FIRST_PSEUDO_REGISTER)
+
+/* 1 if the given register REG corresponds to a virtual register.  */
+#define VIRTUAL_REGISTER_P(REG) VIRTUAL_REGISTER_NUM_P (REGNO (REG))
+
+/* 1 if the given register number REG_NO corresponds to a virtual register.  */
+#define VIRTUAL_REGISTER_NUM_P(REG_NO)					\
+  IN_RANGE (REG_NO, FIRST_VIRTUAL_REGISTER, LAST_VIRTUAL_REGISTER)
 
 /* For a CONST_INT rtx, INTVAL extracts the integer.  */
 #define INTVAL(RTX) XCWINT (RTX, 0, CONST_INT)
@@ -2058,7 +2067,7 @@ const_vector_encoded_nelts (const_rtx x)
 
 /* Return true if CODE always has VOIDmode.  */
 
-static inline bool
+inline bool
 always_void_p (enum rtx_code code)
 {
   return code == SET;
@@ -2073,7 +2082,7 @@ struct full_rtx_costs
 };
 
 /* Initialize a full_rtx_costs structure C to the maximum cost.  */
-static inline void
+inline void
 init_costs_to_max (struct full_rtx_costs *c)
 {
   c->speed = MAX_COST;
@@ -2081,7 +2090,7 @@ init_costs_to_max (struct full_rtx_costs *c)
 }
 
 /* Initialize a full_rtx_costs structure C to zero cost.  */
-static inline void
+inline void
 init_costs_to_zero (struct full_rtx_costs *c)
 {
   c->speed = 0;
@@ -2090,7 +2099,7 @@ init_costs_to_zero (struct full_rtx_costs *c)
 
 /* Compare two full_rtx_costs structures A and B, returning true
    if A < B when optimizing for speed.  */
-static inline bool
+inline bool
 costs_lt_p (struct full_rtx_costs *a, struct full_rtx_costs *b,
 	    bool speed)
 {
@@ -2104,7 +2113,7 @@ costs_lt_p (struct full_rtx_costs *a, struct full_rtx_costs *b,
 
 /* Increase both members of the full_rtx_costs structure C by the
    cost of N insns.  */
-static inline void
+inline void
 costs_add_n_insns (struct full_rtx_costs *c, int n)
 {
   c->speed += COSTS_N_INSNS (n);
@@ -2157,7 +2166,7 @@ subreg_shape::operator != (const subreg_shape &other) const
 inline unsigned HOST_WIDE_INT
 subreg_shape::unique_id () const
 {
-  { STATIC_ASSERT (MAX_MACHINE_MODE <= 256); }
+  { STATIC_ASSERT (MAX_MACHINE_MODE <= (1 << MACHINE_MODE_BITSIZE)); }
   { STATIC_ASSERT (NUM_POLY_INT_COEFFS <= 3); }
   { STATIC_ASSERT (sizeof (offset.coeffs[0]) <= 2); }
   int res = (int) inner_mode + ((int) outer_mode << 8);
@@ -2168,7 +2177,7 @@ subreg_shape::unique_id () const
 
 /* Return the shape of a SUBREG rtx.  */
 
-static inline subreg_shape
+inline subreg_shape
 shape_of_subreg (const_rtx x)
 {
   return subreg_shape (GET_MODE (SUBREG_REG (x)),
@@ -2919,7 +2928,7 @@ extern int currently_expanding_to_rtl;
 /* Return the cost of SET X.  SPEED_P is true if optimizing for speed
    rather than size.  */
 
-static inline int
+inline int
 set_rtx_cost (rtx x, bool speed_p)
 {
   return rtx_cost (x, VOIDmode, INSN, 4, speed_p);
@@ -2927,7 +2936,7 @@ set_rtx_cost (rtx x, bool speed_p)
 
 /* Like set_rtx_cost, but return both the speed and size costs in C.  */
 
-static inline void
+inline void
 get_full_set_rtx_cost (rtx x, struct full_rtx_costs *c)
 {
   get_full_rtx_cost (x, VOIDmode, INSN, 4, c);
@@ -2937,7 +2946,7 @@ get_full_set_rtx_cost (rtx x, struct full_rtx_costs *c)
    of a register move.  SPEED_P is true if optimizing for speed rather
    than size.  */
 
-static inline int
+inline int
 set_src_cost (rtx x, machine_mode mode, bool speed_p)
 {
   return rtx_cost (x, mode, SET, 1, speed_p);
@@ -2945,7 +2954,7 @@ set_src_cost (rtx x, machine_mode mode, bool speed_p)
 
 /* Like set_src_cost, but return both the speed and size costs in C.  */
 
-static inline void
+inline void
 get_full_set_src_cost (rtx x, machine_mode mode, struct full_rtx_costs *c)
 {
   get_full_rtx_cost (x, mode, SET, 1, c);
@@ -3566,6 +3575,7 @@ extern bool val_signbit_known_set_p (machine_mode,
 				     unsigned HOST_WIDE_INT);
 extern bool val_signbit_known_clear_p (machine_mode,
 				       unsigned HOST_WIDE_INT);
+extern bool reverse_rotate_by_imm_p (machine_mode, unsigned int, rtx);
 
 /* In reginfo.cc  */
 extern machine_mode choose_hard_reg_mode (unsigned int, unsigned int,
@@ -3947,7 +3957,7 @@ extern struct target_rtl *this_target_rtl;
 
 #ifndef GENERATOR_FILE
 /* Return the attributes of a MEM rtx.  */
-static inline const class mem_attrs *
+inline const class mem_attrs *
 get_mem_attrs (const_rtx x)
 {
   class mem_attrs *attrs;
@@ -3996,7 +4006,7 @@ extern rtx gen_rtx_VAR_LOCATION (machine_mode, tree, rtx,
 #ifdef GENERATOR_FILE
 #define PUT_MODE(RTX, MODE) PUT_MODE_RAW (RTX, MODE)
 #else
-static inline void
+inline void
 PUT_MODE (rtx x, machine_mode mode)
 {
   if (REG_P (x))
@@ -4077,8 +4087,7 @@ PUT_MODE (rtx x, machine_mode mode)
    || (REGNUM) == FRAME_POINTER_REGNUM		\
    || (REGNUM) == HARD_FRAME_POINTER_REGNUM	\
    || (REGNUM) == ARG_POINTER_REGNUM		\
-   || ((REGNUM) >= FIRST_VIRTUAL_REGISTER	\
-       && (REGNUM) <= LAST_VIRTUAL_POINTER_REGISTER))
+   || VIRTUAL_REGISTER_NUM_P (REGNUM))
 
 /* REGNUM never really appearing in the INSN stream.  */
 #define INVALID_REGNUM			(~(unsigned int) 0)

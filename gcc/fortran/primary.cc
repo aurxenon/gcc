@@ -109,10 +109,10 @@ get_kind (int *is_iso_c)
 /* Given a character and a radix, see if the character is a valid
    digit in that radix.  */
 
-int
+bool
 gfc_check_digit (char c, int radix)
 {
-  int r;
+  bool r;
 
   switch (radix)
     {
@@ -756,8 +756,8 @@ done:
     }
 
   /* Warn about trailing digits which suggest the user added too many
-     trailing digits, which may cause the appearance of higher pecision
-     than the kind kan support.
+     trailing digits, which may cause the appearance of higher precision
+     than the kind can support.
 
      This is done by replacing the rightmost non-zero digit with zero
      and comparing with the original value.  If these are equal, we
@@ -2640,7 +2640,6 @@ gfc_variable_attr (gfc_expr *expr, gfc_typespec *ts)
       codimension = CLASS_DATA (sym)->attr.codimension;
       pointer = CLASS_DATA (sym)->attr.class_pointer;
       allocatable = CLASS_DATA (sym)->attr.allocatable;
-      optional |= CLASS_DATA (sym)->attr.optional;
     }
   else
     {
@@ -2770,7 +2769,7 @@ gfc_expr_attr (gfc_expr *e)
 	{
 	  gfc_symbol *sym = e->value.function.esym->result;
 	  attr = sym->attr;
-	  if (sym->ts.type == BT_CLASS)
+	  if (sym->ts.type == BT_CLASS && sym->attr.class_ok)
 	    {
 	      attr.dimension = CLASS_DATA (sym)->attr.dimension;
 	      attr.pointer = CLASS_DATA (sym)->attr.class_pointer;
@@ -3061,7 +3060,7 @@ build_actual_constructor (gfc_structure_ctor_component **comp_head,
 		return false;
 	      value = gfc_get_null_expr (&gfc_current_locus);
 	    }
-	  /* ....(Preceeding sentence) If a component with default
+	  /* ....(Preceding sentence) If a component with default
 	     initialization has no corresponding component-data-source, then
 	     the default initialization is applied to that component.  */
 	  else if (comp->initializer)

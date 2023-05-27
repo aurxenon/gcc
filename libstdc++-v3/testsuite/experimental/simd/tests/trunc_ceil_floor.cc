@@ -17,16 +17,17 @@
 
 // only: float|double|ldouble * * *
 // expensive: * [1-9] * *
-#include "bits/test_values.h"
-#include "bits/verify.h"
+#include "bits/main.h"
 
 template <typename V>
   void
   test()
   {
     using T = typename V::value_type;
+#ifdef __STDC_IEC_559__
     constexpr T inf = std::__infinity_v<T>;
     constexpr T denorm_min = std::__denorm_min_v<T>;
+#endif
     constexpr T norm_min = std::__norm_min_v<T>;
     constexpr T max = std::__finite_max_v<T>;
     constexpr T min = std::__finite_min_v<T>;

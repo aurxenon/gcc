@@ -1632,7 +1632,7 @@ structural_comptypes (tree t1, tree t2, int strict)
     case TRAIT_TYPE:
       if (TRAIT_TYPE_KIND (t1) != TRAIT_TYPE_KIND (t2))
 	return false;
-      if (!same_type_p (TRAIT_TYPE_TYPE1 (t1), TRAIT_TYPE_TYPE1 (t2))
+      if (!cp_tree_equal (TRAIT_TYPE_TYPE1 (t1), TRAIT_TYPE_TYPE1 (t2))
 	  || !cp_tree_equal (TRAIT_TYPE_TYPE2 (t1), TRAIT_TYPE_TYPE2 (t2)))
 	return false;
       break;
@@ -4996,8 +4996,8 @@ do_warn_enum_conversions (location_t loc, enum tree_code code, tree type0,
 	}
     }
   else if ((TREE_CODE (type0) == ENUMERAL_TYPE
-	    && TREE_CODE (type1) == REAL_TYPE)
-	   || (TREE_CODE (type0) == REAL_TYPE
+	    && SCALAR_FLOAT_TYPE_P (type1))
+	   || (SCALAR_FLOAT_TYPE_P (type0)
 	       && TREE_CODE (type1) == ENUMERAL_TYPE))
     {
       const bool enum_first_p = TREE_CODE (type0) == ENUMERAL_TYPE;
@@ -5780,11 +5780,18 @@ cp_build_binary_op (const op_location_t &location,
 
 	      pfn0 = pfn_from_ptrmemfunc (op0);
 	      delta0 = delta_from_ptrmemfunc (op0);
-	      e1 = cp_build_binary_op (location,
-				       EQ_EXPR,
-	  			       pfn0,
-				       build_zero_cst (TREE_TYPE (pfn0)),
-				       complain);
+	      {
+		/* If we will warn below about a null-address compare
+		   involving the orig_op0 ptrmemfunc, we'd likely also
+		   warn about the pfn0's null-address compare, and
+		   that would be redundant, so suppress it.  */
+		warning_sentinel ws (warn_address);
+		e1 = cp_build_binary_op (location,
+					 EQ_EXPR,
+					 pfn0,
+					 build_zero_cst (TREE_TYPE (pfn0)),
+					 complain);
+	      }
 	      e2 = cp_build_binary_op (location,
 				       BIT_AND_EXPR,
 				       delta0,
@@ -9623,6 +9630,8 @@ cp_build_modify_expr (location_t loc, tree lhs, enum tree_code modifycode,
 	}
 
       /* Allow array assignment in compiler-generated code.  */
+      else if (DECL_P (lhs) && DECL_ARTIFICIAL (lhs))
+	/* OK, used by coroutines (co-await-initlist1.C).  */;
       else if (!current_function_decl
 	       || !DECL_DEFAULTED_FN (current_function_decl))
 	{
@@ -9951,18 +9960,15 @@ build_ptrmemfunc (tree type, tree pfn, int force, bool c_cast_p,
       if (n == error_mark_node)
 	return error_mark_node;
 
+      STRIP_ANY_LOCATION_WRAPPER (pfn);
+
       /* We don't have to do any conversion to convert a
 	 pointer-to-member to its own type.  But, we don't want to
 	 just return a PTRMEM_CST if there's an explicit cast; that
 	 cast should make the expression an invalid template argument.  */
-      if (TREE_CODE (pfn) != PTRMEM_CST)
-	{
-	  if (same_type_p (to_type, pfn_type))
-	    return pfn;
-	  else if (integer_zerop (n) && TREE_CODE (pfn) != CONSTRUCTOR)
-	    return build_reinterpret_cast (input_location, to_type, pfn, 
-                                           complain);
-	}
+      if (TREE_CODE (pfn) != PTRMEM_CST
+	  && same_type_p (to_type, pfn_type))
+	return pfn;
 
       if (TREE_SIDE_EFFECTS (pfn))
 	pfn = save_expr (pfn);
@@ -11230,9 +11236,6 @@ check_return_expr (tree retval, bool *no_warning)
 			 build_zero_cst (TREE_TYPE (retval)));
     }
 
-  if (processing_template_decl)
-    return saved_retval;
-
   /* A naive attempt to reduce the number of -Wdangling-reference false
      positives: if we know that this function can return a variable with
      static storage duration rather than one of its parameters, suppress
@@ -11243,6 +11246,9 @@ check_return_expr (tree retval, bool *no_warning)
       && VAR_P (bare_retval)
       && TREE_STATIC (bare_retval))
     suppress_warning (current_function_decl, OPT_Wdangling_reference);
+
+  if (processing_template_decl)
+    return saved_retval;
 
   /* Actually copy the value returned into the appropriate location.  */
   if (retval && retval != result)
