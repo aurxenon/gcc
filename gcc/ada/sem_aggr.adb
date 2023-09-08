@@ -828,7 +828,7 @@ package body Sem_Aggr is
 
    begin
       P := Loc + 1;
-      for J in  1 .. Strlen loop
+      for J in 1 .. Strlen loop
          C := Get_String_Char (Str, J);
          Set_Character_Literal_Name (C);
 
@@ -1063,6 +1063,19 @@ package body Sem_Aggr is
             Error_Msg_N ("container aggregate must use '['], not ()", N);
          end if;
 
+         Resolve_Container_Aggregate (N, Typ);
+
+      --  Check Ada 2022 empty aggregate [] initializing a record type that has
+      --  aspect aggregate; the empty aggregate will be expanded into a call to
+      --  the empty function specified in the aspect aggregate.
+
+      elsif Has_Aspect (Typ, Aspect_Aggregate)
+        and then Ekind (Typ) = E_Record_Type
+        and then Is_Homogeneous_Aggregate (N)
+        and then Is_Empty_List (Expressions (N))
+        and then Is_Empty_List (Component_Associations (N))
+        and then Ada_Version >= Ada_2022
+      then
          Resolve_Container_Aggregate (N, Typ);
 
       elsif Is_Record_Type (Typ) then
@@ -1331,9 +1344,9 @@ package body Sem_Aggr is
       --  In this event we do not resolve Expr unless expansion is disabled.
       --  To know why, see the DELAYED COMPONENT RESOLUTION note above.
       --
-      --  NOTE: In the case of "... => <>", we pass the in the
-      --  N_Component_Association node as Expr, since there is no Expression in
-      --  that case, and we need a Sloc for the error message.
+      --  NOTE: In the case of "... => <>", we pass the N_Component_Association
+      --  node as Expr, since there is no Expression and we need a Sloc for the
+      --  error message.
 
       procedure Resolve_Iterated_Component_Association
         (N         : Node_Id;
@@ -1790,7 +1803,7 @@ package body Sem_Aggr is
          Choice : Node_Id;
          Dummy  : Boolean;
          Scop   : Entity_Id;
-         Expr   : Node_Id;
+         Expr   : constant Node_Id := Expression (N);
 
       --  Start of processing for Resolve_Iterated_Component_Association
 
@@ -1854,17 +1867,13 @@ package body Sem_Aggr is
             Set_Scope (Id, Scop);
          end if;
 
-         --  Analyze  expression without expansion, to verify legality.
+         --  Analyze expression without expansion, to verify legality.
          --  When generating code, we then remove references to the index
          --  variable, because the expression will be analyzed anew after
          --  rewritting as a loop with a new index variable; when not
          --  generating code we leave the analyzed expression as it is.
 
-         Expr := Expression (N);
-
-         Expander_Mode_Save_And_Set (False);
          Dummy := Resolve_Aggr_Expr (Expr, Single_Elmt => False);
-         Expander_Mode_Restore;
 
          if Operating_Mode /= Check_Semantics then
             Remove_References (Expr);
@@ -2171,9 +2180,11 @@ package body Sem_Aggr is
                      if Is_Type (E) and then Has_Predicates (E) then
                         Freeze_Before (N, E);
 
-                        if Has_Dynamic_Predicate_Aspect (E) then
+                        if Has_Dynamic_Predicate_Aspect (E)
+                          or else Has_Ghost_Predicate_Aspect (E)
+                        then
                            Error_Msg_NE
-                             ("subtype& has dynamic predicate, not allowed "
+                             ("subtype& has non-static predicate, not allowed "
                               & "in aggregate choice", Choice, E);
 
                         elsif not Is_OK_Static_Subtype (E) then
@@ -2356,10 +2367,12 @@ package body Sem_Aggr is
                      Resolve_Discrete_Subtype_Indication (Choice, Index_Base);
 
                      if Has_Dynamic_Predicate_Aspect
-                       (Entity (Subtype_Mark (Choice)))
+                          (Entity (Subtype_Mark (Choice)))
+                       or else Has_Ghost_Predicate_Aspect
+                                 (Entity (Subtype_Mark (Choice)))
                      then
                         Error_Msg_NE
-                          ("subtype& has dynamic predicate, "
+                          ("subtype& has non-static predicate, "
                            & "not allowed in aggregate choice",
                            Choice, Entity (Subtype_Mark (Choice)));
                      end if;
@@ -3228,12 +3241,27 @@ package body Sem_Aggr is
             Analyze_And_Resolve (New_Copy_Tree (Key_Expr), Key_Type);
             End_Scope;
 
+            Typ := Key_Type;
+
          elsif Present (Iterator_Specification (Comp)) then
+            --  Create a temporary scope to avoid some modifications from
+            --  escaping the Analyze call below. The original Tree will be
+            --  reanalyzed later.
+
+            Ent := New_Internal_Entity
+                     (E_Loop, Current_Scope, Sloc (Comp), 'L');
+            Set_Etype  (Ent, Standard_Void_Type);
+            Set_Parent (Ent, Parent (Comp));
+            Push_Scope (Ent);
+
             Copy    := Copy_Separate_Tree (Iterator_Specification (Comp));
             Id_Name :=
               Chars (Defining_Identifier (Iterator_Specification (Comp)));
 
-            Analyze (Copy);
+            Preanalyze (Copy);
+
+            End_Scope;
+
             Typ := Etype (Defining_Identifier (Copy));
 
          else
@@ -3252,7 +3280,7 @@ package body Sem_Aggr is
 
                elsif Present (Key_Type) then
                   Analyze_And_Resolve (Choice, Key_Type);
-
+                  Typ := Key_Type;
                else
                   Typ := Etype (Choice);  --  assume unique for now
                end if;
@@ -3282,12 +3310,8 @@ package body Sem_Aggr is
 
          Enter_Name (Id);
 
-         if No (Key_Type) then
-            pragma Assert (Present (Typ));
-            Set_Etype (Id, Typ);
-         else
-            Set_Etype (Id, Key_Type);
-         end if;
+         pragma Assert (Present (Typ));
+         Set_Etype (Id, Typ);
 
          Mutate_Ekind (Id, E_Variable);
          Set_Is_Not_Self_Hidden (Id);
@@ -3317,6 +3341,7 @@ package body Sem_Aggr is
 
       if Present (Add_Unnamed_Subp)
         and then No (New_Indexed_Subp)
+        and then Present (Etype (Add_Unnamed_Subp))
         and then Etype (Add_Unnamed_Subp) /= Any_Type
       then
          declare
@@ -4546,14 +4571,17 @@ package body Sem_Aggr is
                Component_Associations (New_Aggr));
 
             --  If the discriminant constraint is a current instance, mark the
-            --  current aggregate so that the self-reference can be expanded
-            --  later. The constraint may refer to the subtype of aggregate, so
-            --  use base type for comparison.
+            --  current aggregate so that the self-reference can be expanded by
+            --  Build_Record_Aggr_Code.Replace_Type later.
 
             if Nkind (Discr_Val) = N_Attribute_Reference
               and then Is_Entity_Name (Prefix (Discr_Val))
               and then Is_Type (Entity (Prefix (Discr_Val)))
-              and then Base_Type (Etype (N)) = Entity (Prefix (Discr_Val))
+              and then
+                Is_Ancestor
+                  (Entity (Prefix (Discr_Val)),
+                   Etype (N),
+                   Use_Full_View => True)
             then
                Set_Has_Self_Reference (N);
             end if;
@@ -5632,7 +5660,7 @@ package body Sem_Aggr is
                end if;
 
                Record_Def := Type_Definition (Parent (Base_Type (Parent_Typ)));
-               Gather_Components (Empty,
+               Gather_Components (Parent_Typ,
                  Component_List (Record_Extension_Part (Record_Def)),
                  Governed_By   => New_Assoc_List,
                  Into          => Components,

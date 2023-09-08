@@ -338,12 +338,14 @@ if ![info exists ::env(GCC_RUNTEST_PARALLELIZE_DIR)] {
     rename libgomp_load standard_libgomp_load
     proc libgomp_load { program args } {
 	# ... in order to serialize execution testing via an exclusive lock.
+	# We use stdout, as per <https://perldoc.perl.org/functions/flock>
+	# "[...] FILEHANDLE [...] be open with write intent to use LOCK_EX".
 	set lock_file ../lock
 	set lock_kind --exclusive
 	set lock_fd [open $lock_file a+]
 	set lock_clock_begin [clock seconds]
 	global FLOCK
-	exec $FLOCK $lock_kind 0 <@ $lock_fd
+	exec $FLOCK $lock_kind 1 >@ $lock_fd
 	set lock_clock_end [clock seconds]
 	verbose -log "Got ${FLOCK}('$lock_file', '$lock_kind') at [clock format $lock_clock_end] after [expr $lock_clock_end - $lock_clock_begin] s" 2
 
@@ -373,6 +375,25 @@ proc offload_target_to_openacc_device_type { offload_target } {
 	    error "Unknown offload target: $offload_target"
 	}
     }
+}
+
+# Return 1 if certain nonstandard math functions are available
+# on the target: gamma, scalb, significand, and their float variants.
+proc check_effective_target_nonstandard_math_functions { } {
+    return [check_no_compiler_messages nonstandard_math_functions executable {
+      #include <math.h>
+      int main() {
+        float x = 42;
+        double y = 42;
+        x = gammaf (x);
+        x = __builtin_scalbf (x, 2.f);
+        x =__builtin_significandf (x);
+        y = gamma (y);
+        y = __builtin_scalb (y, 2.);
+        y =__builtin_significand (y);
+        return 0;
+      }
+    } "-lm" ]
 }
 
 # Return 1 if compiling for the specified offload target

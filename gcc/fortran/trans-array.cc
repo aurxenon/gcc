@@ -1117,11 +1117,11 @@ gfc_trans_allocate_array_storage (stmtblock_t * pre, stmtblock_t * post,
 
   desc = info->descriptor;
   info->offset = gfc_index_zero_node;
-  if (size == NULL_TREE || integer_zerop (size))
+  if (size == NULL_TREE || (dynamic && integer_zerop (size)))
     {
       /* A callee allocated array.  */
       gfc_conv_descriptor_data_set (pre, desc, null_pointer_node);
-      onstack = FALSE;
+      onstack = false;
     }
   else
     {
@@ -2481,7 +2481,7 @@ get_array_ctor_strlen (stmtblock_t *block, gfc_constructor_base base, tree * len
   gfc_constructor *c;
   bool is_const;
 
-  is_const = TRUE;
+  is_const = true;
 
   if (gfc_constructor_first (base) == NULL)
     {
@@ -3271,6 +3271,7 @@ gfc_conv_ss_descriptor (stmtblock_t * block, gfc_ss * ss, int base)
   gfc_add_block_to_block (block, &se.pre);
   info->descriptor = se.expr;
   ss_info->string_length = se.string_length;
+  ss_info->class_container = se.class_container;
 
   if (base)
     {
@@ -4738,6 +4739,29 @@ done:
 
       for (n = 0; n < loop->dimen; n++)
 	size[n] = NULL_TREE;
+
+      /* If there is a constructor involved, derive size[] from its shape.  */
+      for (ss = loop->ss; ss != gfc_ss_terminator; ss = ss->loop_chain)
+	{
+	  gfc_ss_info *ss_info;
+
+	  ss_info = ss->info;
+	  info = &ss_info->data.array;
+
+	  if (ss_info->type == GFC_SS_CONSTRUCTOR && info->shape)
+	    {
+	      for (n = 0; n < loop->dimen; n++)
+		{
+		  if (size[n] == NULL)
+		    {
+		      gcc_assert (info->shape[n]);
+		      size[n] = gfc_conv_mpz_to_tree (info->shape[n],
+						      gfc_index_integer_kind);
+		    }
+		}
+	      break;
+	    }
+	}
 
       for (ss = loop->ss; ss != gfc_ss_terminator; ss = ss->loop_chain)
 	{
@@ -7687,6 +7711,8 @@ gfc_conv_expr_descriptor (gfc_se *se, gfc_expr *expr)
 	  else if (deferred_array_component)
 	    se->string_length = ss_info->string_length;
 
+	  se->class_container = ss_info->class_container;
+
 	  gfc_free_ss_chain (ss);
 	  return;
 	}
@@ -7934,7 +7960,8 @@ gfc_conv_expr_descriptor (gfc_se *se, gfc_expr *expr)
 	  else
 	    tmp = se->string_length;
 
-	  if (expr->ts.deferred && VAR_P (expr->ts.u.cl->backend_decl))
+	  if (expr->ts.deferred && expr->ts.u.cl->backend_decl
+	      && VAR_P (expr->ts.u.cl->backend_decl))
 	    gfc_add_modify (&se->pre, expr->ts.u.cl->backend_decl, tmp);
 	  else
 	    expr->ts.u.cl->backend_decl = tmp;
@@ -7997,6 +8024,15 @@ gfc_conv_expr_descriptor (gfc_se *se, gfc_expr *expr)
 		  GFC_DECL_SAVED_DESCRIPTOR (parm) = classse.expr;
 		}
 	    }
+	}
+
+      if (expr->ts.type == BT_CHARACTER
+	  && VAR_P (TYPE_SIZE_UNIT (gfc_get_element_type (TREE_TYPE (parm)))))
+	{
+	  tree elem_len = TYPE_SIZE_UNIT (gfc_get_element_type (TREE_TYPE (parm)));
+	  gfc_add_modify (&loop.pre, elem_len,
+			  fold_convert (TREE_TYPE (elem_len),
+			  gfc_get_array_span (desc, expr)));
 	}
 
       /* Set the span field.  */
@@ -9459,7 +9495,7 @@ structure_alloc_comps (gfc_symbol * der_type, tree decl, tree dest,
 
 	      tmp = gfc_deallocate_with_status (comp, NULL_TREE, NULL_TREE,
 						NULL_TREE, NULL_TREE, true,
-						NULL, caf_dereg_mode,
+						NULL, caf_dereg_mode, NULL_TREE,
 						add_when_allocated, caf_token);
 
 	      gfc_add_expr_to_block (&tmpblock, tmp);

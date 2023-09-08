@@ -49,7 +49,7 @@ AC_DEFUN([GLIBCXX_CONFIGURE], [
   # Keep these sync'd with the list in Makefile.am.  The first provides an
   # expandable list at autoconf time; the second provides an expandable list
   # (i.e., shell variable) at configure time.
-  m4_define([glibcxx_SUBDIRS],[include libsupc++ src src/c++98 src/c++11 src/c++17 src/c++20 src/filesystem src/libbacktrace src/experimental doc po testsuite python])
+  m4_define([glibcxx_SUBDIRS],[include libsupc++ src src/c++98 src/c++11 src/c++17 src/c++20 src/c++23 src/filesystem src/libbacktrace src/experimental doc po testsuite python])
   SUBDIRS='glibcxx_SUBDIRS'
 
   # These need to be absolute paths, yet at the same time need to
@@ -497,6 +497,22 @@ AC_DEFUN([GLIBCXX_CHECK_LFS], [
   if test $glibcxx_cv_LFS = yes; then
     AC_DEFINE(_GLIBCXX_USE_LFS, 1, [Define if LFS support is available.])
   fi
+
+  AC_CACHE_CHECK([for fseeko and ftello], glibcxx_cv_posix_lfs, [
+    GCC_TRY_COMPILE_OR_LINK(
+      [#include <stdio.h>
+      ],
+      [FILE* fp;
+       fseeko(fp, 0, SEEK_CUR);
+       ftello(fp);
+      ],
+      [glibcxx_cv_posix_lfs=yes],
+      [glibcxx_cv_posix_lfs=no])
+  ])
+  if test $glibcxx_cv_posix_lfs = yes; then
+    AC_DEFINE(_GLIBCXX_USE_FSEEKO_FTELLO, 1, [Define if fseeko and ftello are available.])
+  fi
+
   CXXFLAGS="$ac_save_CXXFLAGS"
   AC_LANG_RESTORE
 ])
@@ -588,7 +604,7 @@ dnl  XSL_STYLE_DIR
 dnl
 AC_DEFUN([GLIBCXX_CONFIGURE_DOCBOOK], [
 
-glibcxx_docbook_url=http://docbook.sourceforge.net/release/xsl-ns/current/
+glibcxx_docbook_url=http://cdn.docbook.org/release/xsl/current/
 
 AC_MSG_CHECKING([for local stylesheet directory])
 glibcxx_local_stylesheets=no
@@ -1245,8 +1261,8 @@ AC_DEFUN([GLIBCXX_ENABLE_C99], [
 		imported in <cinttypes> in namespace std in C++11.])
     fi
 
-    # Check for the existence of <math.h> functions used if C99 is enabled.
-    AC_CACHE_CHECK([for ISO C99 support in <math.h> for C++11],
+    # Check for the existence of <math.h> generic macros used if C99 is enabled.
+    AC_CACHE_CHECK([for ISO C99 generic macro support in <math.h> for C++11],
     glibcxx_cv_c99_math_cxx11, [
       GCC_TRY_COMPILE_OR_LINK(
         [#include <math.h>
@@ -1269,8 +1285,178 @@ AC_DEFUN([GLIBCXX_ENABLE_C99], [
     ])
     if test x"$glibcxx_cv_c99_math_cxx11" = x"yes"; then
       AC_DEFINE(_GLIBCXX11_USE_C99_MATH, 1,
-        [Define if C99 functions or macros in <math.h> should be imported
+        [Define if C99 generic macros in <math.h> should be imported
         in <cmath> in namespace std for C++11.])
+    fi
+
+    # Check for the existence of <math.h> typedefs.
+    AC_CACHE_CHECK([for ISO C99 float types for C++11 in <math.h>],
+    glibcxx_cv_c99_flt_eval_types, [
+    AC_TRY_COMPILE([#include <math.h>],
+		   [// Types
+		    typedef double_t  my_double_t;
+		    typedef float_t   my_float_t;
+		   ],
+		   [glibcxx_cv_c99_flt_eval_types=yes],
+		   [glibcxx_cv_c99_flt_eval_types=no])
+    ])
+    if test x"$glibcxx_cv_c99_flt_eval_types" = x"yes"; then
+      AC_DEFINE(HAVE_C99_FLT_EVAL_TYPES, 1,
+		[Define if C99 float_t and double_t in <math.h> should be
+		imported in <cmath> in namespace std for C++11.])
+    fi
+
+    # Check for the existence of <math.h> functions.
+    AC_CACHE_CHECK([for ISO C99 function support for C++11 in <math.h>],
+    glibcxx_cv_c99_math_funcs, [
+    AC_TRY_COMPILE([#include <math.h>],
+		   [
+		    // Hyperbolic
+		    acosh(0.0);
+		    acoshf(0.0f);
+		    acoshl(0.0l);
+		    asinh(0.0);
+		    asinhf(0.0f);
+		    asinhl(0.0l);
+		    atanh(0.0);
+		    atanhf(0.0f);
+		    atanhl(0.0l);
+		    // Exponential and logarithmic
+		    exp2(0.0);
+		    exp2f(0.0f);
+		    exp2l(0.0l);
+		    expm1(0.0);
+		    expm1f(0.0f);
+		    expm1l(0.0l);
+		    ilogb(0.0);
+		    ilogbf(0.0f);
+		    ilogbl(0.0l);
+		    log1p(0.0);
+		    log1pf(0.0f);
+		    log1pl(0.0l);
+		    log2(0.0);
+		    log2f(0.0f);
+		    log2l(0.0l);
+		    logb(0.0);
+		    logbf(0.0f);
+		    logbl(0.0l);
+		    scalbln(0.0, 0l);
+		    scalblnf(0.0f, 0l);
+		    scalblnl(0.0l, 0l);
+		    scalbn(0.0, 0);
+		    scalbnf(0.0f, 0);
+		    scalbnl(0.0l, 0);
+		    // Power and absolute-value
+		    cbrt(0.0);
+		    cbrtf(0.0f);
+		    cbrtl(0.0l);
+		    hypot(0.0, 0.0);
+		    hypotf(0.0f, 0.0f);
+		    hypotl(0.0l, 0.0l);
+		    // Error and gamma
+		    erf(0.0);
+		    erff(0.0f);
+		    erfl(0.0l);
+		    erfc(0.0);
+		    erfcf(0.0f);
+		    erfcl(0.0l);
+		    lgamma(0.0);
+		    lgammaf(0.0f);
+		    lgammal(0.0l);
+		    tgamma(0.0);
+		    tgammaf(0.0f);
+		    tgammal(0.0l);
+		    // Nearest integer
+		    nearbyint(0.0);
+		    nearbyintf(0.0f);
+		    nearbyintl(0.0l);
+		    rint(0.0);
+		    rintf(0.0f);
+		    rintl(0.0l);
+		    round(0.0);
+		    roundf(0.0f);
+		    roundl(0.0l);
+		    lrint(0.0);
+		    lrintf(0.0f);
+		    lrintl(0.0l);
+		    lround(0.0);
+		    lroundf(0.0f);
+		    lroundl(0.0l);
+		    #ifndef __APPLE__ /* see below */
+		    llrint(0.0);
+		    llrintf(0.0f);
+		    llrintl(0.0l);
+		    llround(0.0);
+		    llroundf(0.0f);
+		    llroundl(0.0l);
+		    #endif
+		    trunc(0.0);
+		    truncf(0.0f);
+		    truncl(0.0l);
+		    // Remainder
+		    remainder(0.0, 0.0);
+		    remainderf(0.0f, 0.0f);
+		    remainderl(0.0l, 0.0l);
+		    remquo(0.0, 0.0, 0);
+		    remquof(0.0f, 0.0f, 0);
+		    remquol(0.0l, 0.0l, 0);
+		    // Manipulation
+		    copysign(0.0, 0.0);
+		    copysignf(0.0f, 0.0f);
+		    copysignl(0.0l, 0.0l);
+		    nan("");
+		    nanf("");
+		    nanl("");
+		    nextafter(0.0, 0.0);
+		    nextafterf(0.0f, 0.0f);
+		    nextafterl(0.0l, 0.0l);
+		    nexttoward(0.0, 0.0);
+		    nexttowardf(0.0f, 0.0f);
+		    nexttowardl(0.0l, 0.0l);
+		    // Max, min, positive difference
+		    fdim(0.0, 0.0);
+		    fdimf(0.0f, 0.0f);
+		    fdiml(0.0l, 0.0l);
+		    fmax(0.0, 0.0);
+		    fmaxf(0.0f, 0.0f);
+		    fmaxl(0.0l, 0.0l);
+		    fmin(0.0, 0.0);
+		    fminf(0.0f, 0.0f);
+		    fminl(0.0l, 0.0l);
+		    // FP Multiply-add
+		    fma(0.0, 0.0, 0.0);
+		    fmaf(0.0f, 0.0f, 0.0f);
+		    fmal(0.0l, 0.0l, 0.0l);
+		   ],
+		   [glibcxx_cv_c99_math_funcs=yes],
+		   [glibcxx_cv_c99_math_funcs=no])
+    ])
+    if test x"$glibcxx_cv_c99_math_funcs" = x"yes"; then
+      AC_DEFINE(_GLIBCXX_USE_C99_MATH_FUNCS, 1,
+		[Define if C99 functions in <math.h> should be imported
+		in <cmath> in namespace std for C++11.])
+
+      case "${target_os}" in
+	darwin*)
+	  AC_CACHE_CHECK([for ISO C99 rounding functions in <math.h>],
+	    glibcxx_cv_c99_math_llround, [
+	    AC_TRY_COMPILE([#include <math.h>],
+		   [llrint(0.0);
+		    llrintf(0.0f);
+		    llrintl(0.0l);
+		    llround(0.0);
+		    llroundf(0.0f);
+		    llroundl(0.0l);
+		   ],
+		   [glibcxx_cv_c99_math_llround=yes],
+		   [glibcxx_cv_c99_math_llround=no])
+	    ])
+	  ;;
+      esac
+      if test x"$glibcxx_cv_c99_math_llround" = x"no"; then
+	AC_DEFINE(_GLIBCXX_NO_C99_ROUNDING_FUNCS, 1,
+		  [Define if C99 llrint and llround functions are missing from <math.h>.])
+      fi
     fi
 
     # Check for the existence of <complex.h> complex math functions.
@@ -2152,28 +2338,6 @@ AC_DEFUN([GLIBCXX_CHECK_C99_TR1], [
     AC_DEFINE(_GLIBCXX_USE_C99_MATH_TR1, 1,
 	      [Define if C99 functions or macros in <math.h> should be imported
 	      in <tr1/cmath> in namespace std::tr1.])
-
-    case "${target_os}" in
-      darwin*)
-	AC_CACHE_CHECK([for ISO C99 rounding functions in <math.h>],
-	  glibcxx_cv_c99_math_llround, [
-          AC_TRY_COMPILE([#include <math.h>],
-		 [llrint(0.0);
-		  llrintf(0.0f);
-		  llrintl(0.0l);
-		  llround(0.0);
-		  llroundf(0.0f);
-		  llroundl(0.0l);
-		 ],
-		 [glibcxx_cv_c99_math_llround=yes],
-		 [glibcxx_cv_c99_math_llround=no])
-          ])
-        ;;
-    esac
-    if test x"$glibcxx_cv_c99_math_llround" = x"no"; then
-      AC_DEFINE(_GLIBCXX_NO_C99_ROUNDING_FUNCS, 1,
-		[Define if C99 llrint and llround functions are missing from <math.h>.])
-    fi
   fi
 
   # Check for the existence of <inttypes.h> functions (NB: doesn't make
@@ -4066,7 +4230,7 @@ changequote([,])dnl
 fi
 
 # For libtool versioning info, format is CURRENT:REVISION:AGE
-libtool_VERSION=6:32:0
+libtool_VERSION=6:33:0
 
 # Everything parsed; figure out what files and settings to use.
 case $enable_symvers in
@@ -4806,8 +4970,10 @@ dnl  _GLIBCXX_USE_UTIMENSAT
 dnl  _GLIBCXX_USE_ST_MTIM
 dnl  _GLIBCXX_USE_FCHMOD
 dnl  _GLIBCXX_USE_FCHMODAT
+dnl  _GLIBCXX_USE_COPY_FILE_RANGE
 dnl  _GLIBCXX_USE_SENDFILE
 dnl  HAVE_LINK
+dnl  HAVE_LSEEK
 dnl  HAVE_READLINK
 dnl  HAVE_SYMLINK
 dnl
@@ -4830,6 +4996,66 @@ dnl
   ])
   if test $glibcxx_cv_dirent_d_type = yes; then
     AC_DEFINE(HAVE_STRUCT_DIRENT_D_TYPE, 1, [Define to 1 if `d_type' is a member of `struct dirent'.])
+  fi
+dnl
+  AC_CACHE_CHECK([for chmod], glibcxx_cv_chmod, [dnl
+    GCC_TRY_COMPILE_OR_LINK(
+      [
+       #include <sys/stat.h>
+      ],
+      [
+       int i = chmod("", S_IRUSR);
+      ],
+      [glibcxx_cv_chmod=yes],
+      [glibcxx_cv_chmod=no])
+  ])
+  if test $glibcxx_cv_chmod = yes; then
+    AC_DEFINE(_GLIBCXX_USE_CHMOD, 1, [Define if usable chmod is available in <sys/stat.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for mkdir], glibcxx_cv_mkdir, [dnl
+    GCC_TRY_COMPILE_OR_LINK(
+      [
+       #include <sys/stat.h>
+      ],
+      [
+       int i = mkdir("", S_IRUSR);
+      ],
+      [glibcxx_cv_mkdir=yes],
+      [glibcxx_cv_mkdir=no])
+  ])
+  if test $glibcxx_cv_mkdir = yes; then
+    AC_DEFINE(_GLIBCXX_USE_MKDIR, 1, [Define if usable mkdir is available in <sys/stat.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for chdir], glibcxx_cv_chdir, [dnl
+    GCC_TRY_COMPILE_OR_LINK(
+      [
+       #include <unistd.h>
+      ],
+      [
+       int i = chdir("");
+      ],
+      [glibcxx_cv_chdir=yes],
+      [glibcxx_cv_chdir=no])
+  ])
+  if test $glibcxx_cv_chdir = yes; then
+    AC_DEFINE(_GLIBCXX_USE_CHDIR, 1, [Define if usable chdir is available in <unistd.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for getcwd], glibcxx_cv_getcwd, [dnl
+    GCC_TRY_COMPILE_OR_LINK(
+      [
+       #include <unistd.h>
+      ],
+      [
+       char* s = getcwd((char*)0, 1);
+      ],
+      [glibcxx_cv_getcwd=yes],
+      [glibcxx_cv_getcwd=no])
+  ])
+  if test $glibcxx_cv_getcwd = yes; then
+    AC_DEFINE(_GLIBCXX_USE_GETCWD, 1, [Define if usable getcwd is available in <unistd.h>.])
   fi
 dnl
   AC_CACHE_CHECK([for realpath], glibcxx_cv_realpath, [dnl
@@ -4944,25 +5170,6 @@ dnl
     AC_DEFINE(_GLIBCXX_USE_FCHMODAT, 1, [Define if fchmodat is available in <sys/stat.h>.])
   fi
 dnl
-  AC_CACHE_CHECK([for sendfile that can copy files],
-    glibcxx_cv_sendfile, [dnl
-    case "${target_os}" in
-      gnu* | linux* | solaris* | uclinux*)
-	GCC_TRY_COMPILE_OR_LINK(
-	  [#include <sys/sendfile.h>],
-	  [sendfile(1, 2, (off_t*)0, sizeof 1);],
-	  [glibcxx_cv_sendfile=yes],
-	  [glibcxx_cv_sendfile=no])
-	;;
-      *)
-	glibcxx_cv_sendfile=no
-	;;
-    esac
-  ])
-  if test $glibcxx_cv_sendfile = yes; then
-    AC_DEFINE(_GLIBCXX_USE_SENDFILE, 1, [Define if sendfile is available in <sys/sendfile.h>.])
-  fi
-dnl
   AC_CACHE_CHECK([for link],
     glibcxx_cv_link, [dnl
     GCC_TRY_COMPILE_OR_LINK(
@@ -4973,6 +5180,18 @@ dnl
   ])
   if test $glibcxx_cv_link = yes; then
     AC_DEFINE(HAVE_LINK, 1, [Define if link is available in <unistd.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for lseek],
+    glibcxx_cv_lseek, [dnl
+    GCC_TRY_COMPILE_OR_LINK(
+      [#include <unistd.h>],
+      [lseek(1, 0, SEEK_SET);],
+      [glibcxx_cv_lseek=yes],
+      [glibcxx_cv_lseek=no])
+  ])
+  if test $glibcxx_cv_lseek = yes; then
+    AC_DEFINE(HAVE_LSEEK, 1, [Define if lseek is available in <unistd.h>.])
   fi
 dnl
   AC_CACHE_CHECK([for readlink],
@@ -5009,6 +5228,44 @@ dnl
   ])
   if test $glibcxx_cv_truncate = yes; then
     AC_DEFINE(HAVE_TRUNCATE, 1, [Define if truncate is available in <unistd.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for copy_file_range that can copy files],
+    glibcxx_cv_copy_file_range, [dnl
+    case "${target_os}" in
+      linux*)
+	GCC_TRY_COMPILE_OR_LINK(
+	  [#include <unistd.h>],
+	  [copy_file_range(1, (loff_t*)nullptr, 2, (loff_t*)nullptr, 1, 0);],
+	  [glibcxx_cv_copy_file_range=yes],
+	  [glibcxx_cv_copy_file_range=no])
+	;;
+      *)
+	glibcxx_cv_copy_file_range=no
+	;;
+    esac
+  ])
+  if test $glibcxx_cv_copy_file_range = yes; then
+    AC_DEFINE(_GLIBCXX_USE_COPY_FILE_RANGE, 1, [Define if copy_file_range is available in <unistd.h>.])
+  fi
+dnl
+  AC_CACHE_CHECK([for sendfile that can copy files],
+    glibcxx_cv_sendfile, [dnl
+    case "${target_os}" in
+      gnu* | linux* | solaris* | uclinux*)
+	GCC_TRY_COMPILE_OR_LINK(
+	  [#include <sys/sendfile.h>],
+	  [sendfile(1, 2, (off_t*)0, sizeof 1);],
+	  [glibcxx_cv_sendfile=yes],
+	  [glibcxx_cv_sendfile=no])
+	;;
+      *)
+	glibcxx_cv_sendfile=no
+	;;
+    esac
+  ])
+  if test $glibcxx_cv_sendfile = yes && test $glibcxx_cv_lseek = yes; then
+    AC_DEFINE(_GLIBCXX_USE_SENDFILE, 1, [Define if sendfile is available in <sys/sendfile.h>.])
   fi
 dnl
   AC_CACHE_CHECK([for fdopendir],
@@ -5284,7 +5541,10 @@ BACKTRACE_CPPFLAGS="$BACKTRACE_CPPFLAGS -DBACKTRACE_ELF_SIZE=$elfsize"
 
   AC_MSG_CHECKING([whether to build libbacktrace support])
   if test "$enable_libstdcxx_backtrace" = "auto"; then
-    enable_libstdcxx_backtrace=no
+    case "$host" in
+      avr-*-*) enable_libstdcxx_backtrace=no ;;
+      *) enable_libstdcxx_backtrace="$is_hosted" ;;
+    esac
   fi
   AC_MSG_RESULT($enable_libstdcxx_backtrace)
   if test "$enable_libstdcxx_backtrace" = "yes"; then
@@ -5426,12 +5686,15 @@ AC_DEFUN([GLIBCXX_ZONEINFO_DIR], [
 	zoneinfo_dir=none
 	;;
     esac
-    case "$host" in
-      avr-*-* | msp430-*-* ) embed_zoneinfo=no ;;
-      *)
-	# Also embed a copy of the tzdata.zi file as a static string.
-	embed_zoneinfo=yes ;;
-    esac
+
+    AC_COMPUTE_INT(glibcxx_cv_at_least_32bit, [__INTPTR_WIDTH__ >= 32])
+    if test "$glibcxx_cv_at_least_32bit" -ne 0; then
+      # Also embed a copy of the tzdata.zi file as a static string.
+      embed_zoneinfo=yes
+    else
+      # The embedded data is too large for 16-bit targets.
+      embed_zoneinfo=no
+    fi
   elif test "x${with_libstdcxx_zoneinfo}" = xno; then
     # Disable tzdb support completely.
     zoneinfo_dir=none
@@ -5492,6 +5755,33 @@ AC_DEFUN([GLIBCXX_CHECK_ALIGNAS_CACHELINE], [
        std::hardware_destructive_interference_size.])
   fi
   AC_MSG_RESULT($ac_alignas_cacheline)
+
+  AC_LANG_RESTORE
+])
+
+dnl
+dnl Check whether iostream initialization should be done in the library,
+dnl using the init_priority attribute.
+dnl
+dnl Defines:
+dnl  _GLIBCXX_USE_INIT_PRIORITY_ATTRIBUTE if GCC supports the init_priority
+dnl    attribute for the target.
+dnl
+AC_DEFUN([GLIBCXX_CHECK_INIT_PRIORITY], [
+AC_LANG_SAVE
+  AC_LANG_CPLUSPLUS
+
+  AC_MSG_CHECKING([whether init_priority attribute is supported])
+  AC_TRY_COMPILE(, [
+  #if ! __has_attribute(init_priority)
+  #error init_priority not supported
+  #endif
+		 ], [ac_init_priority=yes], [ac_init_priority=no])
+  if test "$ac_init_priority" = yes; then
+    AC_DEFINE_UNQUOTED(_GLIBCXX_USE_INIT_PRIORITY_ATTRIBUTE, 1,
+      [Define if init_priority should be used for iostream initialization.])
+  fi
+  AC_MSG_RESULT($ac_init_priority)
 
   AC_LANG_RESTORE
 ])

@@ -41,6 +41,7 @@ with Exp_Dist;       use Exp_Dist;
 with Exp_Util;       use Exp_Util;
 with Expander;       use Expander;
 with Freeze;         use Freeze;
+with Ghost;          use Ghost;
 with Gnatvsn;        use Gnatvsn;
 with Itypes;         use Itypes;
 with Lib;            use Lib;
@@ -1513,6 +1514,7 @@ package body Sem_Attr is
          elsif Nkind (Subp_Decl) not in N_Abstract_Subprogram_Declaration
                                       | N_Entry_Declaration
                                       | N_Expression_Function
+                                      | N_Full_Type_Declaration
                                       | N_Generic_Subprogram_Declaration
                                       | N_Subprogram_Body
                                       | N_Subprogram_Body_Stub
@@ -2011,10 +2013,20 @@ package body Sem_Attr is
                Flag_Non_Static_Expr
                  ("expression for dimension must be static!", E1);
                Error_Attr;
-
-            elsif Expr_Value (E1) > D or else Expr_Value (E1) < 1 then
-               Error_Attr ("invalid dimension number for array type", E1);
             end if;
+
+            declare
+               Value : constant Uint := Expr_Value (E1);
+            begin
+
+               if Value > D or else Value < 1 then
+                  Error_Attr ("invalid dimension number for array type", E1);
+               end if;
+
+               --  Replace the static value to simplify the tree for gigi
+               Fold_Uint (E1, Value, True);
+            end;
+
          end if;
 
          if (Style_Check and Style_Check_Array_Attribute_Index)
@@ -4782,8 +4794,9 @@ package body Sem_Attr is
             Loop_Decl : constant Node_Id := Label_Construct (Parent (Loop_Id));
 
             function Check_Reference (Nod : Node_Id) return Traverse_Result;
-            --  Determine whether a reference mentions an entity declared
-            --  within the related loop.
+            --  Detect attribute 'Loop_Entry in prefix P and determine whether
+            --  a reference mentions an entity declared within the related
+            --  loop.
 
             function Declared_Within (Nod : Node_Id) return Boolean;
             --  Determine whether Nod appears in the subtree of Loop_Decl but
@@ -4794,8 +4807,22 @@ package body Sem_Attr is
             ---------------------
 
             function Check_Reference (Nod : Node_Id) return Traverse_Result is
+               Orig_Nod : constant Node_Id := Original_Node (Nod);
+               --  Check presence of Loop_Entry in the prefix P by looking at
+               --  the original node for Nod, as it will have been rewritten
+               --  into its own prefix if the assertion is ignored (see code
+               --  below).
+
             begin
-               if Nkind (Nod) = N_Identifier
+               if Is_Attribute_Loop_Entry (Orig_Nod) then
+                  Error_Msg_Name_1 := Name_Loop_Entry;
+                  Error_Msg_Name_2 := Name_Loop_Entry;
+                  Error_Msg_N
+                    ("attribute % cannot appear in the prefix of attribute %",
+                     Nod);
+                  return Abandon;
+
+               elsif Nkind (Nod) = N_Identifier
                  and then Present (Entity (Nod))
                  and then Declared_Within (Declaration_Node (Entity (Nod)))
                then
@@ -5894,7 +5921,9 @@ package body Sem_Attr is
             --  When a qualified name is used for the prefix, homonyms may come
             --  before the current function in the homonym chain.
 
-            elsif Has_Homonym (Pref_Id) then
+            elsif Has_Homonym (Pref_Id)
+              and then Present (Homonym (Pref_Id))
+            then
                return Denote_Same_Function (Homonym (Pref_Id), Spec_Id);
             end if;
 
@@ -6003,6 +6032,18 @@ package body Sem_Attr is
 
                   --  Otherwise the prefix denotes some unrelated function
 
+                  else
+                     Error_Msg_Name_2 := Chars (Spec_Id);
+                     Error_Attr
+                       ("incorrect prefix for attribute %, expected %", P);
+                  end if;
+
+               --  If the prefix is an access-to-subprogram type, then it must
+               --  be the same as the annotated type.
+
+               elsif Is_Access_Subprogram_Type (Pref_Id) then
+                  if Pref_Id = Spec_Id then
+                     Set_Etype (N, Etype (Designated_Type (Spec_Id)));
                   else
                      Error_Msg_Name_2 := Chars (Spec_Id);
                      Error_Attr
@@ -8423,9 +8464,13 @@ package body Sem_Attr is
         --  However, the attribute Unconstrained_Array must be evaluated,
         --  since it is documented to be a static attribute (and can for
         --  example appear in a Compile_Time_Warning pragma). The frozen
-        --  status of the type does not affect its evaluation.
+        --  status of the type does not affect its evaluation. Likewise
+        --  for attributes intended to be used with generic definitions.
 
-        and then Id /= Attribute_Unconstrained_Array
+        and then Id not in Attribute_Unconstrained_Array
+                        |  Attribute_Has_Access_Values
+                        |  Attribute_Has_Discriminants
+                        |  Attribute_Has_Tagged_Values
       then
          return;
       end if;
@@ -11053,6 +11098,12 @@ package body Sem_Attr is
 
       if Is_Universal_Numeric_Type (Etype (N)) then
          Set_Etype (N, Typ);
+      end if;
+
+      --  A Ghost attribute must appear in a specific context
+
+      if Is_Ghost_Attribute_Reference (N) then
+         Check_Ghost_Context (Empty, N);
       end if;
 
       --  Remaining processing depends on attribute

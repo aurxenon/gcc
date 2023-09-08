@@ -394,13 +394,9 @@ package body Exp_Ch7 is
    --  Check recursively whether a loop or block contains a subprogram that
    --  may need an activation record.
 
-   function Convert_View
-     (Proc : Entity_Id;
-      Arg  : Node_Id;
-      Ind  : Pos := 1) return Node_Id;
+   function Convert_View (Proc : Entity_Id; Arg  : Node_Id) return Node_Id;
    --  Proc is one of the Initialize/Adjust/Finalize operations, and Arg is the
-   --  argument being passed to it. Ind indicates which formal of procedure
-   --  Proc we are trying to match. This function will, if necessary, generate
+   --  argument being passed to it. This function will, if necessary, generate
    --  a conversion between the partial and full view of Arg to match the type
    --  of the formal of Proc, or force a conversion to the class-wide type in
    --  the case where the operation is abstract.
@@ -4402,22 +4398,12 @@ package body Exp_Ch7 is
    -- Convert_View --
    ------------------
 
-   function Convert_View
-     (Proc : Entity_Id;
-      Arg  : Node_Id;
-      Ind  : Pos := 1) return Node_Id
-   is
-      Fent : Entity_Id := First_Entity (Proc);
-      Ftyp : Entity_Id;
+   function Convert_View (Proc : Entity_Id; Arg  : Node_Id) return Node_Id is
+      Ftyp : constant Entity_Id := Etype (First_Formal (Proc));
+
       Atyp : Entity_Id;
 
    begin
-      for J in 2 .. Ind loop
-         Next_Entity (Fent);
-      end loop;
-
-      Ftyp := Etype (Fent);
-
       if Nkind (Arg) in N_Type_Conversion | N_Unchecked_Type_Conversion then
          Atyp := Entity (Subtype_Mark (Arg));
       else
@@ -4427,11 +4413,13 @@ package body Exp_Ch7 is
       if Is_Abstract_Subprogram (Proc) and then Is_Tagged_Type (Ftyp) then
          return Unchecked_Convert_To (Class_Wide_Type (Ftyp), Arg);
 
-      elsif Ftyp /= Atyp
-        and then Present (Atyp)
-        and then (Is_Private_Type (Ftyp) or else Is_Private_Type (Atyp))
-        and then Base_Type (Underlying_Type (Atyp)) =
-                 Base_Type (Underlying_Type (Ftyp))
+      elsif Present (Atyp)
+        and then Atyp /= Ftyp
+        and then (Is_Private_Type (Ftyp)
+                   or else Is_Private_Type (Atyp)
+                   or else Is_Private_Type (Base_Type (Atyp)))
+        and then Implementation_Base_Type (Atyp) =
+                 Implementation_Base_Type (Ftyp)
       then
          return Unchecked_Convert_To (Ftyp, Arg);
 
@@ -4476,10 +4464,10 @@ package body Exp_Ch7 is
       function Is_Package_Or_Subprogram (Id : Entity_Id) return Boolean;
       --  Determine whether arbitrary Id denotes a package or subprogram [body]
 
-      function Find_Enclosing_Transient_Scope return Entity_Id;
+      function Find_Enclosing_Transient_Scope return Int;
       --  Examine the scope stack looking for the nearest enclosing transient
       --  scope within the innermost enclosing package or subprogram. Return
-      --  Empty if no such scope exists.
+      --  its index in the table or else -1 if no such scope exists.
 
       function Find_Transient_Context (N : Node_Id) return Node_Id;
       --  Locate a suitable context for arbitrary node N which may need to be
@@ -4605,7 +4593,7 @@ package body Exp_Ch7 is
       -- Find_Enclosing_Transient_Scope --
       ------------------------------------
 
-      function Find_Enclosing_Transient_Scope return Entity_Id is
+      function Find_Enclosing_Transient_Scope return Int is
       begin
          for Index in reverse Scope_Stack.First .. Scope_Stack.Last loop
             declare
@@ -4620,12 +4608,12 @@ package body Exp_Ch7 is
                   exit;
 
                elsif Scope.Is_Transient then
-                  return Scope.Entity;
+                  return Index;
                end if;
             end;
          end loop;
 
-         return Empty;
+         return -1;
       end Find_Enclosing_Transient_Scope;
 
       ----------------------------
@@ -4717,21 +4705,29 @@ package body Exp_Ch7 is
                   return Curr;
 
                when N_Simple_Return_Statement =>
+                  declare
+                     Fun_Id : constant Entity_Id :=
+                       Return_Applies_To (Return_Statement_Entity (Curr));
 
-                  --  A return statement is not a valid transient context when
-                  --  the function itself requires transient scope management
-                  --  because the result will be reclaimed too early.
+                  begin
+                     --  A transient context that must manage the secondary
+                     --  stack cannot be a return statement of a function that
+                     --  itself requires secondary stack management, because
+                     --  the function's result would be reclaimed too early.
+                     --  And returns of thunks never require transient scopes.
 
-                  if Requires_Transient_Scope (Etype
-                       (Return_Applies_To (Return_Statement_Entity (Curr))))
-                  then
-                     return Empty;
+                     if (Manage_Sec_Stack
+                          and then Needs_Secondary_Stack (Etype (Fun_Id)))
+                       or else Is_Thunk (Fun_Id)
+                     then
+                        return Empty;
 
-                  --  General case for return statements
+                     --  General case for return statements
 
-                  else
-                     return Curr;
-                  end if;
+                     else
+                        return Curr;
+                     end if;
+                  end;
 
                --  Special
 
@@ -4814,8 +4810,8 @@ package body Exp_Ch7 is
 
       --  Local variables
 
-      Trans_Id : constant Entity_Id := Find_Enclosing_Transient_Scope;
-      Context  : Node_Id;
+      Trans_Idx : constant Int := Find_Enclosing_Transient_Scope;
+      Context   : Node_Id;
 
    --  Start of processing for Establish_Transient_Scope
 
@@ -4823,13 +4819,29 @@ package body Exp_Ch7 is
       --  Do not create a new transient scope if there is already an enclosing
       --  transient scope within the innermost enclosing package or subprogram.
 
-      if Present (Trans_Id) then
+      if Trans_Idx >= 0 then
 
          --  If the transient scope was requested for purposes of managing the
-         --  secondary stack, then the existing scope must perform this task.
+         --  secondary stack, then the existing scope must perform this task,
+         --  unless the node to be wrapped is a return statement of a function
+         --  that requires secondary stack management, because the function's
+         --  result would be reclaimed too early (see Find_Transient_Context).
 
          if Manage_Sec_Stack then
-            Set_Uses_Sec_Stack (Trans_Id);
+            declare
+               SE : Scope_Stack_Entry renames Scope_Stack.Table (Trans_Idx);
+
+            begin
+               if Nkind (SE.Node_To_Be_Wrapped) /= N_Simple_Return_Statement
+                 or else not
+                   Needs_Secondary_Stack
+                     (Etype
+                       (Return_Applies_To
+                         (Return_Statement_Entity (SE.Node_To_Be_Wrapped))))
+               then
+                  Set_Uses_Sec_Stack (SE.Entity);
+               end if;
+            end;
          end if;
 
          return;
@@ -8375,6 +8387,8 @@ package body Exp_Ch7 is
              Param     => Ref,
              Skip_Self => Skip_Self);
       else
+         pragma Assert (Serious_Errors_Detected > 0
+                        or else not Has_Controlled_Component (Utyp));
          return Empty;
       end if;
    end Make_Final_Call;

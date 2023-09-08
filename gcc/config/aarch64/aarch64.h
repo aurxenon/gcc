@@ -222,7 +222,6 @@ enum class aarch64_feature : unsigned char {
 #define AARCH64_ISA_MOPS	   (aarch64_isa_flags & AARCH64_FL_MOPS)
 #define AARCH64_ISA_LS64	   (aarch64_isa_flags & AARCH64_FL_LS64)
 #define AARCH64_ISA_CSSC	   (aarch64_isa_flags & AARCH64_FL_CSSC)
-#define AARCH64_ISA_RCPC           (aarch64_isa_flags & AARCH64_FL_RCPC)
 
 /* Crypto is an optional extension to AdvSIMD.  */
 #define TARGET_CRYPTO (AARCH64_ISA_CRYPTO)
@@ -292,7 +291,7 @@ enum class aarch64_feature : unsigned char {
 #define TARGET_RNG (AARCH64_ISA_RNG)
 
 /* Memory Tagging instructions optional to Armv8.5 enabled through +memtag.  */
-#define TARGET_MEMTAG (AARCH64_ISA_V8_5A && AARCH64_ISA_MEMTAG)
+#define TARGET_MEMTAG (AARCH64_ISA_MEMTAG)
 
 /* I8MM instructions are enabled through +i8mm.  */
 #define TARGET_I8MM (AARCH64_ISA_I8MM)
@@ -1296,5 +1295,10 @@ extern poly_uint16 aarch64_sve_vg;
    the first relevant use.  */
 #define REG_ALLOC_ORDER {}
 #define ADJUST_REG_ALLOC_ORDER aarch64_adjust_reg_alloc_order ()
+
+#define AARCH64_VALID_SHRN_OP(T,S)			\
+((T) == TRUNCATE					\
+ || ((T) == US_TRUNCATE && (S) == LSHIFTRT)		\
+ || ((T) == SS_TRUNCATE && (S) == ASHIFTRT))
 
 #endif /* GCC_AARCH64_H */

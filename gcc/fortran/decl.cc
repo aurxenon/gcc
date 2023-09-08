@@ -1056,6 +1056,7 @@ static match
 char_len_param_value (gfc_expr **expr, bool *deferred)
 {
   match m;
+  gfc_expr *p;
 
   *expr = NULL;
   *deferred = false;
@@ -1081,10 +1082,12 @@ char_len_param_value (gfc_expr **expr, bool *deferred)
   if (!gfc_expr_check_typed (*expr, gfc_current_ns, false))
     return MATCH_ERROR;
 
-  /* If gfortran gets an EXPR_OP, try to simplify it.  This catches things
-     like CHARACTER(([1])).   */
-  if ((*expr)->expr_type == EXPR_OP)
-    gfc_simplify_expr (*expr, 1);
+  /* Try to simplify the expression to catch things like CHARACTER(([1])).   */
+  p = gfc_copy_expr (*expr);
+  if (gfc_is_constant_expr (p) && gfc_simplify_expr (p, 1))
+    gfc_replace_expr (*expr, p);
+  else
+    gfc_free_expr (p);
 
   if ((*expr)->expr_type == EXPR_FUNCTION)
     {
@@ -3366,6 +3369,7 @@ close_brackets:
       else
 	gfc_error ("Missing right parenthesis at %C");
       m = MATCH_ERROR;
+      goto no_match;
     }
   else
      /* All tests passed.  */
@@ -4703,6 +4707,9 @@ get_kind:
     }
 
   m = gfc_match_kind_spec (ts, false);
+  if (m == MATCH_ERROR)
+    return MATCH_ERROR;
+
   if (m == MATCH_NO && ts->type != BT_CHARACTER)
     {
       m = gfc_match_old_kind_spec (ts);
@@ -6057,9 +6064,7 @@ verify_bind_c_sym (gfc_symbol *tmp_sym, gfc_typespec *ts,
 
       /* BIND(C) functions cannot return a character string.  */
       if (bind_c_function && tmp_sym->ts.type == BT_CHARACTER)
-	if (tmp_sym->ts.u.cl == NULL || tmp_sym->ts.u.cl->length == NULL
-	    || tmp_sym->ts.u.cl->length->expr_type != EXPR_CONSTANT
-	    || mpz_cmp_si (tmp_sym->ts.u.cl->length->value.integer, 1) != 0)
+	if (!gfc_length_one_character_type_p (&tmp_sym->ts))
 	  gfc_error ("Return type of BIND(C) function %qs of character "
 		     "type at %L must have length 1", tmp_sym->name,
 			 &(tmp_sym->declared_at));

@@ -124,6 +124,9 @@ __register_frame_info_bases (const void *begin, struct object *ob,
 #endif
 
 #ifdef ATOMIC_FDE_FAST_PATH
+  // Register the object itself to know the base pointer on deregistration.
+  btree_insert (&registered_frames, (uintptr_type) begin, 1, ob);
+
   // Register the frame in the b-tree
   uintptr_type range[2];
   get_pc_range (ob, range);
@@ -175,6 +178,9 @@ __register_frame_info_table_bases (void *begin, struct object *ob,
   ob->s.b.encoding = DW_EH_PE_omit;
 
 #ifdef ATOMIC_FDE_FAST_PATH
+  // Register the object itself to know the base pointer on deregistration.
+  btree_insert (&registered_frames, (uintptr_type) begin, 1, ob);
+
   // Register the frame in the b-tree
   uintptr_type range[2];
   get_pc_range (ob, range);
@@ -225,22 +231,23 @@ __deregister_frame_info_bases (const void *begin)
     return ob;
 
 #ifdef ATOMIC_FDE_FAST_PATH
-  // Find the corresponding PC range
-  struct object lookupob;
-  lookupob.tbase = 0;
-  lookupob.dbase = 0;
-  lookupob.u.single = begin;
-  lookupob.s.i = 0;
-  lookupob.s.b.encoding = DW_EH_PE_omit;
-#ifdef DWARF2_OBJECT_END_PTR_EXTENSION
-  lookupob.fde_end = NULL;
-#endif
-  uintptr_type range[2];
-  get_pc_range (&lookupob, range);
+  // Find the originally registered object to get the base pointer.
+  ob = btree_remove (&registered_frames, (uintptr_type) begin);
 
-  // And remove
-  ob = btree_remove (&registered_frames, range[0]);
-  bool empty_table = (range[1] - range[0]) == 0;
+  // Remove the corresponding PC range.
+  if (ob)
+    {
+      uintptr_type range[2];
+      get_pc_range (ob, range);
+      if (range[0] != range[1])
+    btree_remove (&registered_frames, range[0]);
+    }
+
+  // Deallocate the sort array if any.
+  if (ob && ob->s.b.sorted)
+    {
+      free (ob->u.sort);
+    }
 #else
   init_object_mutex_once ();
   __gthread_mutex_lock (&object_mutex);
@@ -277,12 +284,11 @@ __deregister_frame_info_bases (const void *begin)
 
  out:
   __gthread_mutex_unlock (&object_mutex);
-  const int empty_table = 0; // The non-atomic path stores all tables.
 #endif
 
   // If we didn't find anything in the lookup data structures then they
   // were either already destroyed or we tried to remove an empty range.
-  gcc_assert (in_shutdown || (empty_table || ob));
+  gcc_assert (in_shutdown || ob);
   return (void *) ob;
 }
 
@@ -628,8 +634,6 @@ fde_radixsort (struct object *ob, fde_extractor_t fde_extractor,
       // Stop if we are already sorted.
       if (!violations)
 	{
-	  // The sorted data is in a1 now.
-	  a2 = a1;
 	  break;
 	}
 
@@ -664,9 +668,9 @@ fde_radixsort (struct object *ob, fde_extractor_t fde_extractor,
 #undef FANOUT
 #undef FANOUTBITS
 
-  // The data is in a2 now, move in place if needed.
-  if (a2 != v1->array)
-    memcpy (v1->array, a2, sizeof (const fde *) * n);
+  // The data is in a1 now, move in place if needed.
+  if (a1 != v1->array)
+    memcpy (v1->array, a1, sizeof (const fde *) * n);
 }
 
 static inline void

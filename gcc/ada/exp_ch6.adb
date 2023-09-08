@@ -37,6 +37,7 @@ with Expander;       use Expander;
 with Exp_Aggr;       use Exp_Aggr;
 with Exp_Atag;       use Exp_Atag;
 with Exp_Ch3;        use Exp_Ch3;
+with Exp_Ch4;        use Exp_Ch4;
 with Exp_Ch7;        use Exp_Ch7;
 with Exp_Ch9;        use Exp_Ch9;
 with Exp_Dbug;       use Exp_Dbug;
@@ -311,6 +312,30 @@ package body Exp_Ch6 is
    --  Insert the Post_Call list previously produced by routine Expand_Actuals
    --  or Expand_Call_Helper into the tree.
 
+   function Is_True_Build_In_Place_Function_Call (N : Node_Id) return Boolean;
+   --  Ada 2005 (AI-318-02): Returns True if N denotes a call to a function
+   --  that requires handling as a build-in-place call; returns False for
+   --  non-BIP function calls and also for calls to functions with inherited
+   --  BIP formals that do not require BIP formals. For example:
+   --
+   --    type Iface is limited interface;
+   --    function Get_Object return Iface;
+   --    --  This function has BIP extra formals
+   --
+   --    type Root1 is limited tagged record ...
+   --    type T1 is new Root1 and Iface with ...
+   --    function Get_Object return T1;
+   --    --  This primitive requires the BIP formals, and the evaluation of
+   --    --  Is_True_Build_In_Place_Function_Call returns True.
+   --
+   --    type Root2 is tagged record ...
+   --    type T2 is new Root2 and Iface with ...
+   --    function Get_Object return T2;
+   --    --  This primitive inherits the BIP formals of the interface primitive
+   --    --  but, given that T2 is not a limited type, it does not require such
+   --    --  formals; therefore Is_True_Build_In_Place_Function_Call returns
+   --    --  False.
+
    procedure Replace_Renaming_Declaration_Id
       (New_Decl  : Node_Id;
        Orig_Decl : Node_Id);
@@ -480,6 +505,8 @@ package body Exp_Ch6 is
          Desig_Typ : Entity_Id;
 
       begin
+         pragma Assert (Present (Formal));
+
          --  If there is a finalization master actual, such as the implicit
          --  finalization master of an enclosing build-in-place function,
          --  then this must be added as an extra actual of the call.
@@ -620,6 +647,27 @@ package body Exp_Ch6 is
       --  No such extra parameters are needed if there are no tasks
 
       if not Needs_BIP_Task_Actuals (Function_Id) then
+
+         --  However we must add dummy extra actuals if the function is
+         --  a dispatching operation that inherited these extra formals.
+
+         if Is_Dispatching_Operation (Function_Id)
+           and then Has_BIP_Extra_Formal (Function_Id, BIP_Task_Master)
+         then
+            Master_Formal :=
+              Build_In_Place_Formal (Function_Id, BIP_Task_Master);
+            Actual := Make_Integer_Literal (Loc, Uint_0);
+            Analyze_And_Resolve (Actual, Etype (Master_Formal));
+            Add_Extra_Actual_To_Call (Function_Call, Master_Formal, Actual);
+
+            Chain_Formal :=
+              Build_In_Place_Formal (Function_Id, BIP_Activation_Chain);
+            Chain_Actual := Make_Null (Loc);
+            Analyze_And_Resolve (Chain_Actual, Etype (Chain_Formal));
+            Add_Extra_Actual_To_Call
+              (Function_Call, Chain_Formal, Chain_Actual);
+         end if;
+
          return;
       end if;
 
@@ -893,8 +941,7 @@ package body Exp_Ch6 is
       --  the Alias of an instance, which will cause the formals to have
       --  "incorrect" names.
 
-      loop
-         pragma Assert (Present (Extra_Formal));
+      while Present (Extra_Formal) loop
          declare
             Name : constant String := Get_Name_String (Chars (Extra_Formal));
          begin
@@ -905,6 +952,10 @@ package body Exp_Ch6 is
 
          Next_Formal_With_Extras (Extra_Formal);
       end loop;
+
+      if No (Extra_Formal) then
+         raise Program_Error;
+      end if;
 
       return Extra_Formal;
    end Build_In_Place_Formal;
@@ -2800,7 +2851,40 @@ package body Exp_Ch6 is
    -----------------
 
    procedure Expand_Call (N : Node_Id) is
-      Post_Call : List_Id;
+      function Is_Unchecked_Union_Equality (N : Node_Id) return Boolean;
+      --  Return True if N is a call to the predefined equality operator of an
+      --  unchecked union type, or a renaming thereof.
+
+      ---------------------------------
+      -- Is_Unchecked_Union_Equality --
+      ---------------------------------
+
+      function Is_Unchecked_Union_Equality (N : Node_Id) return Boolean is
+      begin
+         if Is_Entity_Name (Name (N))
+           and then Ekind (Entity (Name (N))) = E_Function
+           and then Present (First_Formal (Entity (Name (N))))
+           and then
+             Is_Unchecked_Union (Etype (First_Formal (Entity (Name (N)))))
+         then
+            declare
+               Func : constant Entity_Id := Entity (Name (N));
+               Typ  : constant Entity_Id := Etype (First_Formal (Func));
+               Decl : constant Node_Id   :=
+                 Original_Node (Parent (Declaration_Node (Func)));
+
+            begin
+               return Func = TSS (Typ, TSS_Composite_Equality)
+                 or else (Nkind (Decl) = N_Subprogram_Renaming_Declaration
+                           and then Nkind (Name (Decl)) = N_Operator_Symbol
+                           and then Chars (Name (Decl)) = Name_Op_Eq
+                           and then Ekind (Entity (Name (Decl))) = E_Operator);
+            end;
+
+         else
+            return False;
+         end if;
+      end Is_Unchecked_Union_Equality;
 
       --  If this is an indirect call through an Access_To_Subprogram
       --  with contract specifications, it is rewritten as a call to
@@ -2814,6 +2898,10 @@ package body Exp_Ch6 is
           and then Ekind (Etype (Name (N))) = E_Subprogram_Type
           and then Present
             (Access_Subprogram_Wrapper (Etype (Name (N))));
+
+      Post_Call : List_Id;
+
+   --  Start of processing for Expand_Call
 
    begin
       pragma Assert (Nkind (N) in N_Entry_Call_Statement
@@ -2890,6 +2978,27 @@ package body Exp_Ch6 is
             Analyze_And_Resolve (N, Typ);
          end;
 
+      --  Case of a call to the predefined equality operator of an unchecked
+      --  union type, which requires specific processing.
+
+      elsif Is_Unchecked_Union_Equality (N) then
+         declare
+            Eq : constant Entity_Id := Entity (Name (N));
+
+         begin
+            Expand_Unchecked_Union_Equality (N);
+
+            --  If the call was not rewritten as a raise, expand the actuals
+
+            if Nkind (N) = N_Function_Call then
+               pragma Assert (Check_Number_Of_Actuals (N, Eq));
+               Expand_Actuals (N, Eq, Post_Call);
+               pragma Assert (Is_Empty_List (Post_Call));
+            end if;
+         end;
+
+      --  Normal case
+
       else
          Expand_Call_Helper (N, Post_Call);
          Insert_Post_Call_Actions (N, Post_Call);
@@ -2935,6 +3044,13 @@ package body Exp_Ch6 is
       --  formals complicate the process of propagating extra accessibility
       --  actuals and must be handled in a recursive fashion since they can
       --  be embedded within each other.
+
+      procedure Add_Dummy_Build_In_Place_Actuals
+        (Function_Id             : Entity_Id;
+         Num_Added_Extra_Actuals : Nat := 0);
+      --  Adds dummy actuals for the BIP extra formals of the called function.
+      --  Num_Added_Extra_Actuals is the number of non-BIP extra actuals added
+      --  to the actuals immediately before calling this subprogram.
 
       procedure Add_Extra_Actual (Expr : Node_Id; EF : Entity_Id);
       --  Adds an extra actual to the list of extra actuals. Expr is the
@@ -3194,6 +3310,83 @@ package body Exp_Ch6 is
             EF   => Extra_Accessibility (Formal));
       end Add_Cond_Expression_Extra_Actual;
 
+      --------------------------------------
+      -- Add_Dummy_Build_In_Place_Actuals --
+      --------------------------------------
+
+      procedure Add_Dummy_Build_In_Place_Actuals
+        (Function_Id             : Entity_Id;
+         Num_Added_Extra_Actuals : Nat := 0)
+      is
+         Loc        : constant Source_Ptr := Sloc (Call_Node);
+         Formal     : Entity_Id           := Extra_Formals (Function_Id);
+         Actual     : Node_Id;
+         Skip_Extra : Nat;
+
+      begin
+         --  We never generate extra formals if expansion is not active because
+         --  we don't need them unless we are generating code. No action needed
+         --  for thunks since they propagate all their extra actuals.
+
+         if not Expander_Active
+           or else Is_Thunk (Current_Scope)
+         then
+            return;
+         end if;
+
+         --  Skip already-added non-BIP extra actuals
+
+         Skip_Extra := Num_Added_Extra_Actuals;
+         while Skip_Extra > 0 loop
+            pragma Assert (not Is_Build_In_Place_Entity (Formal));
+            Formal := Extra_Formal (Formal);
+            Skip_Extra := Skip_Extra - 1;
+         end loop;
+
+         --  Append the dummy BIP extra actuals
+
+         while Present (Formal) loop
+            pragma Assert (Is_Build_In_Place_Entity (Formal));
+
+            --  BIPalloc
+
+            if Etype (Formal) = Standard_Natural then
+               Actual := Make_Integer_Literal (Loc, Uint_0);
+               Analyze_And_Resolve (Actual, Standard_Natural);
+               Add_Extra_Actual_To_Call (N, Formal, Actual);
+
+            --  BIPtaskmaster
+
+            elsif Etype (Formal) = Standard_Integer then
+               Actual := Make_Integer_Literal (Loc, Uint_0);
+               Analyze_And_Resolve (Actual, Standard_Integer);
+               Add_Extra_Actual_To_Call (N, Formal, Actual);
+
+            --  BIPstoragepool, BIPfinalizationmaster, BIPactivationchain,
+            --  and BIPaccess.
+
+            elsif Is_Access_Type (Etype (Formal)) then
+               Actual := Make_Null (Loc);
+               Analyze_And_Resolve (Actual, Etype (Formal));
+               Add_Extra_Actual_To_Call (N, Formal, Actual);
+
+            else
+               pragma Assert (False);
+               raise Program_Error;
+            end if;
+
+            Formal := Extra_Formal (Formal);
+         end loop;
+
+         --  Mark the call as processed build-in-place call; required
+         --  to avoid adding the extra formals twice.
+
+         Set_Is_Expanded_Build_In_Place_Call (Call_Node);
+
+         pragma Assert (Check_Number_Of_Actuals (Call_Node, Function_Id));
+         pragma Assert (Check_BIP_Actuals (Call_Node, Function_Id));
+      end Add_Dummy_Build_In_Place_Actuals;
+
       ----------------------
       -- Add_Extra_Actual --
       ----------------------
@@ -3405,6 +3598,7 @@ package body Exp_Ch6 is
            or else No (Aspect)
 
            --  Do not fold if multiple applicable predicate aspects
+           or else Has_Ghost_Predicate_Aspect (Subt)
            or else Has_Aspect (Subt, Aspect_Static_Predicate)
            or else Has_Aspect (Subt, Aspect_Predicate)
            or else Augments_Other_Dynamic_Predicate (Aspect)
@@ -4638,10 +4832,35 @@ package body Exp_Ch6 is
       --  During that loop we gathered the extra actuals (the ones that
       --  correspond to Extra_Formals), so now they can be appended.
 
-      else
-         while Is_Non_Empty_List (Extra_Actuals) loop
-            Add_Actual_Parameter (Remove_Head (Extra_Actuals));
-         end loop;
+      elsif Is_Non_Empty_List (Extra_Actuals) then
+         declare
+            Num_Extra_Actuals : constant Nat := List_Length (Extra_Actuals);
+
+         begin
+            while Is_Non_Empty_List (Extra_Actuals) loop
+               Add_Actual_Parameter (Remove_Head (Extra_Actuals));
+            end loop;
+
+            --  Add dummy extra BIP actuals if we are calling a function that
+            --  inherited the BIP extra actuals but does not require them.
+
+            if Nkind (Call_Node) = N_Function_Call
+              and then Is_Build_In_Place_Function_Call (Call_Node)
+              and then not Is_True_Build_In_Place_Function_Call (Call_Node)
+            then
+               Add_Dummy_Build_In_Place_Actuals (Subp,
+                 Num_Added_Extra_Actuals => Num_Extra_Actuals);
+            end if;
+         end;
+
+      --  Add dummy extra BIP actuals if we are calling a function that
+      --  inherited the BIP extra actuals but does not require them.
+
+      elsif Nkind (Call_Node) = N_Function_Call
+        and then Is_Build_In_Place_Function_Call (Call_Node)
+        and then not Is_True_Build_In_Place_Function_Call (Call_Node)
+      then
+         Add_Dummy_Build_In_Place_Actuals (Subp);
       end if;
 
       --  At this point we have all the actuals, so this is the point at which
@@ -5188,8 +5407,16 @@ package body Exp_Ch6 is
       --  Optimization: if the returned value is returned again, then no need
       --  to copy/readjust/finalize, we can just pass the value through (see
       --  Expand_N_Simple_Return_Statement), and thus no attachment is needed.
+      --  Note that simple return statements are distributed into conditional
+      --  expressions but we may be invoked before this distribution is done.
 
-      if Nkind (Par) = N_Simple_Return_Statement then
+      if Nkind (Par) = N_Simple_Return_Statement
+        or else (Nkind (Par) = N_If_Expression
+                  and then Nkind (Parent (Par)) = N_Simple_Return_Statement)
+        or else (Nkind (Par) = N_Case_Expression_Alternative
+                  and then
+                    Nkind (Parent (Parent (Par))) = N_Simple_Return_Statement)
+      then
          return;
       end if;
 
@@ -5360,7 +5587,7 @@ package body Exp_Ch6 is
             pragma Assert (Ekind (Current_Subprogram) = E_Function);
             pragma Assert
               (Is_Build_In_Place_Function (Current_Subprogram) =
-               Is_Build_In_Place_Function_Call (Exp));
+               Is_True_Build_In_Place_Function_Call (Exp));
             null;
          end if;
 
@@ -6555,14 +6782,9 @@ package body Exp_Ch6 is
 
       if Nkind (Exp) = N_Function_Call then
          pragma Assert (Ekind (Scope_Id) = E_Function);
-
-         --  This assertion works fine because Is_Build_In_Place_Function_Call
-         --  returns True for BIP function calls but also for function calls
-         --  that have BIP formals.
-
          pragma Assert
-           (Has_BIP_Formals (Scope_Id) =
-            Is_Build_In_Place_Function_Call (Exp));
+           (Is_Build_In_Place_Function (Scope_Id) =
+            Is_True_Build_In_Place_Function_Call (Exp));
          null;
       end if;
 
@@ -6585,7 +6807,7 @@ package body Exp_Ch6 is
 
       pragma Assert
         (Comes_From_Extended_Return_Statement (N)
-          or else not Is_Build_In_Place_Function_Call (Exp)
+          or else not Is_True_Build_In_Place_Function_Call (Exp)
           or else Has_BIP_Formals (Scope_Id));
 
       if not Comes_From_Extended_Return_Statement (N)
@@ -6633,6 +6855,13 @@ package body Exp_Ch6 is
       if Is_Boolean_Type (Exp_Typ) and then Nonzero_Is_True (Exp_Typ) then
          Adjust_Condition (Exp);
          Adjust_Result_Type (Exp, Exp_Typ);
+
+         --  The adjustment of the expression may have rewritten the return
+         --  statement itself, e.g. when it is turned into an if expression.
+
+         if Nkind (N) /= N_Simple_Return_Statement then
+            return;
+         end if;
       end if;
 
       --  Do validity check if enabled for returns
@@ -6880,7 +7109,7 @@ package body Exp_Ch6 is
 
                Temp := Make_Temporary (Loc, 'R', Alloc_Node);
 
-               Insert_List_Before_And_Analyze (N, New_List (
+               Insert_Actions (Exp, New_List (
                  Make_Full_Type_Declaration (Loc,
                    Defining_Identifier => Acc_Typ,
                    Type_Definition     =>
@@ -7925,6 +8154,40 @@ package body Exp_Ch6 is
       end if;
    end Is_Build_In_Place_Function_Call;
 
+   ------------------------------------------
+   -- Is_True_Build_In_Place_Function_Call --
+   ------------------------------------------
+
+   function Is_True_Build_In_Place_Function_Call (N : Node_Id) return Boolean
+   is
+      Exp_Node    : Node_Id;
+      Function_Id : Entity_Id;
+
+   begin
+      --  No action needed if we know that this is not a BIP function call
+
+      if not Is_Build_In_Place_Function_Call (N) then
+         return False;
+      end if;
+
+      Exp_Node := Unqual_Conv (N);
+
+      if Is_Entity_Name (Name (Exp_Node)) then
+         Function_Id := Entity (Name (Exp_Node));
+
+      elsif Nkind (Name (Exp_Node)) = N_Explicit_Dereference then
+         Function_Id := Etype (Name (Exp_Node));
+
+      elsif Nkind (Name (Exp_Node)) = N_Selected_Component then
+         Function_Id := Etype (Entity (Selector_Name (Name (Exp_Node))));
+
+      else
+         raise Program_Error;
+      end if;
+
+      return Is_Build_In_Place_Function (Function_Id);
+   end Is_True_Build_In_Place_Function_Call;
+
    -----------------------------------
    -- Is_Build_In_Place_Result_Type --
    -----------------------------------
@@ -8077,6 +8340,14 @@ package body Exp_Ch6 is
                             | N_Unchecked_Type_Conversion
       then
          Func_Call := Expression (Func_Call);
+      end if;
+
+      --  No action needed if the called function inherited the BIP extra
+      --  formals but it is not a true BIP function.
+
+      if not Is_True_Build_In_Place_Function_Call (Func_Call) then
+         pragma Assert (Is_Expanded_Build_In_Place_Call (Func_Call));
+         return;
       end if;
 
       --  Mark the call as processed as a build-in-place call
@@ -8484,6 +8755,14 @@ package body Exp_Ch6 is
       Result_Subt  : Entity_Id;
 
    begin
+      --  No action needed if the called function inherited the BIP extra
+      --  formals but it is not a true BIP function.
+
+      if not Is_True_Build_In_Place_Function_Call (Func_Call) then
+         pragma Assert (Is_Expanded_Build_In_Place_Call (Func_Call));
+         return;
+      end if;
+
       --  Mark the call as processed as a build-in-place call
 
       pragma Assert (not Is_Expanded_Build_In_Place_Call (Func_Call));

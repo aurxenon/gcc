@@ -2815,12 +2815,16 @@ ref_maybe_used_by_call_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
       case IFN_SCATTER_STORE:
       case IFN_MASK_SCATTER_STORE:
       case IFN_LEN_STORE:
+      case IFN_MASK_LEN_STORE:
 	return false;
       case IFN_MASK_STORE_LANES:
+      case IFN_MASK_LEN_STORE_LANES:
 	goto process_args;
       case IFN_MASK_LOAD:
       case IFN_LEN_LOAD:
+      case IFN_MASK_LEN_LOAD:
       case IFN_MASK_LOAD_LANES:
+      case IFN_MASK_LEN_LOAD_LANES:
 	{
 	  ao_ref rhs_ref;
 	  tree lhs = gimple_call_lhs (call);
@@ -2829,6 +2833,9 @@ ref_maybe_used_by_call_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
 	      ao_ref_init_from_ptr_and_size (&rhs_ref,
 					     gimple_call_arg (call, 0),
 					     TYPE_SIZE_UNIT (TREE_TYPE (lhs)));
+	      /* We cannot make this a known-size access since otherwise
+		 we disambiguate against refs to decls that are smaller.  */
+	      rhs_ref.size = -1;
 	      rhs_ref.ref_alias_set = rhs_ref.base_alias_set
 		= tbaa_p ? get_deref_alias_set (TREE_TYPE
 					(gimple_call_arg (call, 1))) : 0;
@@ -3065,13 +3072,18 @@ call_may_clobber_ref_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
 	return false;
       case IFN_MASK_STORE:
       case IFN_LEN_STORE:
+      case IFN_MASK_LEN_STORE:
       case IFN_MASK_STORE_LANES:
+      case IFN_MASK_LEN_STORE_LANES:
 	{
 	  tree rhs = gimple_call_arg (call,
 				      internal_fn_stored_value_index (fn));
 	  ao_ref lhs_ref;
 	  ao_ref_init_from_ptr_and_size (&lhs_ref, gimple_call_arg (call, 0),
 					 TYPE_SIZE_UNIT (TREE_TYPE (rhs)));
+	  /* We cannot make this a known-size access since otherwise
+	     we disambiguate against refs to decls that are smaller.  */
+	  lhs_ref.size = -1;
 	  lhs_ref.ref_alias_set = lhs_ref.base_alias_set
 	    = tbaa_p ? get_deref_alias_set
 				   (TREE_TYPE (gimple_call_arg (call, 1))) : 0;

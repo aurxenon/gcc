@@ -67,4 +67,4 @@ int test_popcountll(unsigned long long x, unsigned long long y)
 
 /* 4 types of functions, each with 3 types and there are 2 goto each */
 /* { dg-final { scan-tree-dump-times "goto " 24 "optimized" } } */
-
+/* { dg-final { scan-tree-dump-times "x_..D. != 0" 12 "optimized" } } */

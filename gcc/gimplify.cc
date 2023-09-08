@@ -3209,6 +3209,9 @@ gimplify_compound_lval (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
     {
       tree t = expr_stack[i];
 
+      if (error_operand_p (TREE_OPERAND (t, 0)))
+	return GS_ERROR;
+
       if (TREE_CODE (t) == ARRAY_REF || TREE_CODE (t) == ARRAY_RANGE_REF)
 	{
 	  /* Deal with the low bound and element type size and put them into
@@ -3660,7 +3663,7 @@ gimplify_call_expr (tree *expr_p, gimple_seq *pre_p, bool want_value)
 
       case BUILT_IN_VA_START:
         {
-	  builtin_va_start_p = TRUE;
+	  builtin_va_start_p = true;
 	  if (call_expr_nargs (*expr_p) < 2)
 	    {
 	      error ("too few arguments to function %<va_start%>");
@@ -5253,7 +5256,8 @@ gimplify_init_constructor (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
 	    && TREE_READONLY (object)
 	    && VAR_P (object)
 	    && !DECL_REGISTER (object)
-	    && (flag_merge_constants >= 2 || !TREE_ADDRESSABLE (object))
+	    && (flag_merge_constants >= 2 || !TREE_ADDRESSABLE (object)
+		|| DECL_MERGEABLE (object))
 	    /* For ctors that have many repeated nonzero elements
 	       represented through RANGE_EXPRs, prefer initializing
 	       those through runtime loops over copies of large amounts
@@ -5976,6 +5980,7 @@ is_gimple_stmt (tree t)
     case OMP_SCOPE:
     case OMP_SECTIONS:
     case OMP_SECTION:
+    case OMP_STRUCTURED_BLOCK:
     case OMP_SINGLE:
     case OMP_MASTER:
     case OMP_MASKED:
@@ -6934,7 +6939,12 @@ gimplify_asm_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
       stmt = gimple_build_asm_vec (TREE_STRING_POINTER (ASM_STRING (expr)),
 				   inputs, outputs, clobbers, labels);
 
-      gimple_asm_set_volatile (stmt, ASM_VOLATILE_P (expr) || noutputs == 0);
+      /* asm is volatile if it was marked by the user as volatile or
+	 there are no outputs or this is an asm goto.  */
+      gimple_asm_set_volatile (stmt,
+			       ASM_VOLATILE_P (expr)
+			       || noutputs == 0
+			       || labels);
       gimple_asm_set_input (stmt, ASM_INPUT_P (expr));
       gimple_asm_set_inline (stmt, ASM_INLINE_P (expr));
 
@@ -7173,8 +7183,10 @@ gimplify_target_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
 	gimplify_and_add (init, &init_pre_p);
 
       /* Add a clobber for the temporary going out of scope, like
-	 gimplify_bind_expr.  */
+	 gimplify_bind_expr.  But only if we did not promote the
+	 temporary to static storage.  */
       if (gimplify_ctxp->in_cleanup_point_expr
+	  && !TREE_STATIC (temp)
 	  && needs_to_live_in_memory (temp))
 	{
 	  if (flag_stack_reuse == SR_ALL)
@@ -7688,6 +7700,25 @@ omp_default_clause (struct gimplify_omp_ctx *ctx, tree decl,
   return flags;
 }
 
+/* Return string name for types of OpenACC constructs from ORT_* values.  */
+
+static const char *
+oacc_region_type_name (enum omp_region_type region_type)
+{
+  switch (region_type)
+    {
+    case ORT_ACC_DATA:
+      return "data";
+    case ORT_ACC_PARALLEL:
+      return "parallel";
+    case ORT_ACC_KERNELS:
+      return "kernels";
+    case ORT_ACC_SERIAL:
+      return "serial";
+    default:
+      gcc_unreachable ();
+    }
+}
 
 /* Determine outer default flags for DECL mentioned in an OACC region
    but not declared in an enclosing clause.  */
@@ -7695,7 +7726,23 @@ omp_default_clause (struct gimplify_omp_ctx *ctx, tree decl,
 static unsigned
 oacc_default_clause (struct gimplify_omp_ctx *ctx, tree decl, unsigned flags)
 {
-  const char *rkind;
+  struct gimplify_omp_ctx *ctx_default = ctx;
+  /* If no 'default' clause appears on this compute construct...  */
+  if (ctx_default->default_kind == OMP_CLAUSE_DEFAULT_SHARED)
+    {
+      /* ..., see if one appears on a lexically containing 'data'
+	 construct.  */
+      while ((ctx_default = ctx_default->outer_context))
+	{
+	  if (ctx_default->region_type == ORT_ACC_DATA
+	      && ctx_default->default_kind != OMP_CLAUSE_DEFAULT_SHARED)
+	    break;
+	}
+      /* If not, reset.  */
+      if (!ctx_default)
+	ctx_default = ctx;
+    }
+
   bool on_device = false;
   bool is_private = false;
   bool declared = is_oacc_declared (decl);
@@ -7727,14 +7774,12 @@ oacc_default_clause (struct gimplify_omp_ctx *ctx, tree decl, unsigned flags)
   switch (ctx->region_type)
     {
     case ORT_ACC_KERNELS:
-      rkind = "kernels";
-
       if (is_private)
 	flags |= GOVD_FIRSTPRIVATE;
       else if (AGGREGATE_TYPE_P (type))
 	{
 	  /* Aggregates default to 'present_or_copy', or 'present'.  */
-	  if (ctx->default_kind != OMP_CLAUSE_DEFAULT_PRESENT)
+	  if (ctx_default->default_kind != OMP_CLAUSE_DEFAULT_PRESENT)
 	    flags |= GOVD_MAP;
 	  else
 	    flags |= GOVD_MAP | GOVD_MAP_FORCE_PRESENT;
@@ -7747,8 +7792,6 @@ oacc_default_clause (struct gimplify_omp_ctx *ctx, tree decl, unsigned flags)
 
     case ORT_ACC_PARALLEL:
     case ORT_ACC_SERIAL:
-      rkind = ctx->region_type == ORT_ACC_PARALLEL ? "parallel" : "serial";
-
       if (is_private)
 	flags |= GOVD_FIRSTPRIVATE;
       else if (on_device || declared)
@@ -7756,7 +7799,7 @@ oacc_default_clause (struct gimplify_omp_ctx *ctx, tree decl, unsigned flags)
       else if (AGGREGATE_TYPE_P (type))
 	{
 	  /* Aggregates default to 'present_or_copy', or 'present'.  */
-	  if (ctx->default_kind != OMP_CLAUSE_DEFAULT_PRESENT)
+	  if (ctx_default->default_kind != OMP_CLAUSE_DEFAULT_PRESENT)
 	    flags |= GOVD_MAP;
 	  else
 	    flags |= GOVD_MAP | GOVD_MAP_FORCE_PRESENT;
@@ -7774,16 +7817,23 @@ oacc_default_clause (struct gimplify_omp_ctx *ctx, tree decl, unsigned flags)
   if (DECL_ARTIFICIAL (decl))
     ; /* We can get compiler-generated decls, and should not complain
 	 about them.  */
-  else if (ctx->default_kind == OMP_CLAUSE_DEFAULT_NONE)
+  else if (ctx_default->default_kind == OMP_CLAUSE_DEFAULT_NONE)
     {
       error ("%qE not specified in enclosing OpenACC %qs construct",
-	     DECL_NAME (lang_hooks.decls.omp_report_decl (decl)), rkind);
-      inform (ctx->location, "enclosing OpenACC %qs construct", rkind);
+	     DECL_NAME (lang_hooks.decls.omp_report_decl (decl)),
+	     oacc_region_type_name (ctx->region_type));
+      if (ctx_default != ctx)
+	inform (ctx->location, "enclosing OpenACC %qs construct and",
+		oacc_region_type_name (ctx->region_type));
+      inform (ctx_default->location,
+	      "enclosing OpenACC %qs construct with %qs clause",
+	      oacc_region_type_name (ctx_default->region_type),
+	      "default(none)");
     }
-  else if (ctx->default_kind == OMP_CLAUSE_DEFAULT_PRESENT)
+  else if (ctx_default->default_kind == OMP_CLAUSE_DEFAULT_PRESENT)
     ; /* Handled above.  */
   else
-    gcc_checking_assert (ctx->default_kind == OMP_CLAUSE_DEFAULT_SHARED);
+    gcc_checking_assert (ctx_default->default_kind == OMP_CLAUSE_DEFAULT_SHARED);
 
   return flags;
 }
@@ -7923,6 +7973,11 @@ omp_notice_variable (struct gimplify_omp_ctx *ctx, tree decl, bool in_code)
 		  else if (ctx->defaultmap[gdmk]
 			   & (GOVD_MAP_0LEN_ARRAY | GOVD_FIRSTPRIVATE))
 		    nflags |= ctx->defaultmap[gdmk];
+		  else if (ctx->defaultmap[gdmk] & GOVD_MAP_FORCE_PRESENT)
+		    {
+		      gcc_assert (ctx->defaultmap[gdmk] & GOVD_MAP);
+		      nflags |= ctx->defaultmap[gdmk] | GOVD_MAP_ALLOC_ONLY;
+		    }
 		  else
 		    {
 		      gcc_assert (ctx->defaultmap[gdmk] & GOVD_MAP);
@@ -9097,6 +9152,13 @@ omp_get_attachment (omp_mapping_group *grp)
     case GOMP_MAP_FORCE_TO:
     case GOMP_MAP_FORCE_TOFROM:
     case GOMP_MAP_FORCE_PRESENT:
+    case GOMP_MAP_PRESENT_ALLOC:
+    case GOMP_MAP_PRESENT_FROM:
+    case GOMP_MAP_PRESENT_TO:
+    case GOMP_MAP_PRESENT_TOFROM:
+    case GOMP_MAP_ALWAYS_PRESENT_FROM:
+    case GOMP_MAP_ALWAYS_PRESENT_TO:
+    case GOMP_MAP_ALWAYS_PRESENT_TOFROM:
     case GOMP_MAP_ALLOC:
     case GOMP_MAP_RELEASE:
     case GOMP_MAP_DELETE:
@@ -9328,6 +9390,13 @@ omp_group_base (omp_mapping_group *grp, unsigned int *chained,
     case GOMP_MAP_FORCE_TO:
     case GOMP_MAP_FORCE_TOFROM:
     case GOMP_MAP_FORCE_PRESENT:
+    case GOMP_MAP_PRESENT_ALLOC:
+    case GOMP_MAP_PRESENT_FROM:
+    case GOMP_MAP_PRESENT_TO:
+    case GOMP_MAP_PRESENT_TOFROM:
+    case GOMP_MAP_ALWAYS_PRESENT_FROM:
+    case GOMP_MAP_ALWAYS_PRESENT_TO:
+    case GOMP_MAP_ALWAYS_PRESENT_TOFROM:
     case GOMP_MAP_ALLOC:
     case GOMP_MAP_RELEASE:
     case GOMP_MAP_DELETE:
@@ -10809,6 +10878,50 @@ gimplify_scan_omp_clauses (tree *list_p, gimple_seq *pre_p,
 	  delete grpmap;
 	  delete groups;
 	}
+
+      /* OpenMP map clauses with 'present' need to go in front of those
+	 without.  */
+      tree present_map_head = NULL;
+      tree *present_map_tail_p = &present_map_head;
+      tree *first_map_clause_p = NULL;
+
+      for (tree *c_p = list_p; *c_p; )
+	{
+	  tree c = *c_p;
+	  tree *next_c_p = &OMP_CLAUSE_CHAIN (c);
+
+	  if (OMP_CLAUSE_CODE (c) == OMP_CLAUSE_MAP)
+	    {
+	      if (!first_map_clause_p)
+		first_map_clause_p = c_p;
+	      switch (OMP_CLAUSE_MAP_KIND (c))
+		{
+		case GOMP_MAP_PRESENT_ALLOC:
+		case GOMP_MAP_PRESENT_FROM:
+		case GOMP_MAP_PRESENT_TO:
+		case GOMP_MAP_PRESENT_TOFROM:
+		  next_c_p = c_p;
+		  *c_p = OMP_CLAUSE_CHAIN (c);
+
+		  OMP_CLAUSE_CHAIN (c) = NULL;
+		  *present_map_tail_p = c;
+		  present_map_tail_p = &OMP_CLAUSE_CHAIN (c);
+
+		  break;
+
+		default:
+		  break;
+		}
+	    }
+
+	  c_p = next_c_p;
+	}
+      if (first_map_clause_p && present_map_head)
+	{
+	  tree next = *first_map_clause_p;
+	  *first_map_clause_p = present_map_head;
+	  *present_map_tail_p = next;
+	}
     }
   else if (region_type & ORT_ACC)
     {
@@ -11925,6 +12038,7 @@ gimplify_scan_omp_clauses (tree *list_p, gimple_seq *pre_p,
 	  switch (OMP_CLAUSE_DEFAULTMAP_CATEGORY (c))
 	    {
 	    case OMP_CLAUSE_DEFAULTMAP_CATEGORY_UNSPECIFIED:
+	    case OMP_CLAUSE_DEFAULTMAP_CATEGORY_ALL:
 	      gdmkmin = GDMK_SCALAR;
 	      gdmkmax = GDMK_POINTER;
 	      break;
@@ -11964,6 +12078,9 @@ gimplify_scan_omp_clauses (tree *list_p, gimple_seq *pre_p,
 		break;
 	      case OMP_CLAUSE_DEFAULTMAP_NONE:
 		ctx->defaultmap[gdmk] = 0;
+		break;
+	      case OMP_CLAUSE_DEFAULTMAP_PRESENT:
+		ctx->defaultmap[gdmk] = GOVD_MAP | GOVD_MAP_FORCE_PRESENT;
 		break;
 	      case OMP_CLAUSE_DEFAULTMAP_DEFAULT:
 		switch (gdmk)
@@ -12409,6 +12526,9 @@ gimplify_adjust_omp_clauses_1 (splay_tree_node n, void *data)
 	case GOVD_MAP_FORCE_PRESENT:
 	  kind = GOMP_MAP_FORCE_PRESENT;
 	  break;
+	case GOVD_MAP_FORCE_PRESENT | GOVD_MAP_ALLOC_ONLY:
+	  kind = GOMP_MAP_FORCE_PRESENT;
+	  break;
 	default:
 	  gcc_unreachable ();
 	}
@@ -12725,6 +12845,17 @@ gimplify_adjust_omp_clauses (gimple_seq *pre_p, gimple_seq body, tree *list_p,
 	  break;
 
 	case OMP_CLAUSE_MAP:
+	  switch (OMP_CLAUSE_MAP_KIND (c))
+	    {
+	    case GOMP_MAP_PRESENT_ALLOC:
+	    case GOMP_MAP_PRESENT_TO:
+	    case GOMP_MAP_PRESENT_FROM:
+	    case GOMP_MAP_PRESENT_TOFROM:
+	      OMP_CLAUSE_SET_MAP_KIND (c, GOMP_MAP_FORCE_PRESENT);
+	      break;
+	    default:
+	      break;
+	    }
 	  if (code == OMP_TARGET_EXIT_DATA
 	      && OMP_CLAUSE_MAP_KIND (c) == GOMP_MAP_ALWAYS_POINTER)
 	    {
@@ -16907,6 +17038,7 @@ gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
 	  break;
 
 	case OMP_SECTION:
+	case OMP_STRUCTURED_BLOCK:
 	case OMP_MASTER:
 	case OMP_MASKED:
 	case OMP_ORDERED:
@@ -16925,6 +17057,9 @@ gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
 	      case OMP_SECTION:
 	        g = gimple_build_omp_section (body);
 	        break;
+	      case OMP_STRUCTURED_BLOCK:
+		g = gimple_build_omp_structured_block (body);
+		break;
 	      case OMP_MASTER:
 		g = gimple_build_omp_master (body);
 		break;
@@ -17325,6 +17460,7 @@ gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
 		  && code != OMP_SCAN
 		  && code != OMP_SECTIONS
 		  && code != OMP_SECTION
+		  && code != OMP_STRUCTURED_BLOCK
 		  && code != OMP_SINGLE
 		  && code != OMP_SCOPE);
     }

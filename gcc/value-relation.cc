@@ -183,6 +183,20 @@ relation_transitive (relation_kind r1, relation_kind r2)
   return relation_kind (rr_transitive_table[r1][r2]);
 }
 
+// When operands of a statement are identical ssa_names, return the
+// approriate relation between operands for NAME == NAME, given RANGE.
+//
+relation_kind
+get_identity_relation (tree name, vrange &range ATTRIBUTE_UNUSED)
+{
+  // Return VREL_UNEQ when it is supported for floats as appropriate.
+  if (frange::supports_p (TREE_TYPE (name)))
+    return VREL_EQ;
+
+  // Otherwise return VREL_EQ.
+  return VREL_EQ;
+}
+
 // This vector maps a relation to the equivalent tree code.
 
 static const tree_code relation_to_code [VREL_LAST] = {
@@ -218,7 +232,7 @@ relation_oracle::validate_relation (relation_kind rel, vrange &op1, vrange &op2)
     return VREL_VARYING;
 
   // If there is no handler, leave the relation as is.
-  range_op_handler handler (code, t1);
+  range_op_handler handler (code);
   if (!handler)
     return rel;
 

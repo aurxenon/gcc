@@ -1475,6 +1475,9 @@ package Sem_Util is
    --  Return True if the loop has no side effect and can therefore be
    --  marked for removal. Return False if N is not a N_Loop_Statement.
 
+   function Is_Container_Aggregate (Exp : Node_Id) return Boolean;
+   --  Is the given expression a container aggregate?
+
    function Is_Newly_Constructed
      (Exp : Node_Id; Context_Requires_NC : Boolean) return Boolean;
    --  Indicates whether a given expression is "newly constructed" (RM 4.4).
@@ -1696,9 +1699,14 @@ package Sem_Util is
    --  either the value is not yet known before back-end processing or it is
    --  not known at compile time after back-end processing.
 
-   procedure Inherit_Predicate_Flags (Subt, Par : Entity_Id);
+   procedure Inherit_Predicate_Flags
+     (Subt, Par  : Entity_Id;
+      Only_Flags : Boolean := False);
    --  Propagate static and dynamic predicate flags from a parent to the
-   --  subtype in a subtype declaration with and without constraints.
+   --  subtype in a subtype declaration with and without constraints, or from
+   --  a parent to the derived type in a derived type declaration. Only_Flags
+   --  is True in the case of a derived type declaration to inherit only the
+   --  flags, not the predicate functions.
 
    procedure Inherit_Rep_Item_Chain (Typ : Entity_Id; From_Typ : Entity_Id);
    --  Inherit the rep item chain of type From_Typ without clobbering any
@@ -2080,12 +2088,6 @@ package Sem_Util is
    --  E is a subprogram. Return True is E is an implicit operation inherited
    --  by a derived type declaration.
 
-   function Is_Inherited_Operation_For_Type
-     (E   : Entity_Id;
-      Typ : Entity_Id) return Boolean;
-   --  E is a subprogram. Return True is E is an implicit operation inherited
-   --  by the derived type declaration for type Typ.
-
    function Is_Inlinable_Expression_Function (Subp : Entity_Id) return Boolean;
    --  Return True if Subp is an expression function that fulfills all the
    --  following requirements for inlining:
@@ -2347,6 +2349,7 @@ package Sem_Util is
    function Is_Subprogram_Contract_Annotation (Item : Node_Id) return Boolean;
    --  Determine whether aspect specification or pragma Item is one of the
    --  following subprogram contract annotations:
+   --    Always_Terminates
    --    Contract_Cases
    --    Depends
    --    Exceptional_Cases
@@ -3328,8 +3331,8 @@ package Sem_Util is
    function Validated_View (Typ : Entity_Id) return Entity_Id;
    --  Obtain the "validated view" of arbitrary type Typ which is suitable for
    --  verification by attribute 'Valid_Scalars. This view is the type itself
-   --  or its full view while stripping away concurrency, derivations, and
-   --  privacy.
+   --  or its full view or nonlimited view, while stripping away concurrency,
+   --  derivations, and privacy.
 
    function Visible_Ancestors (Typ : Entity_Id) return Elist_Id;
    --  [Ada 2012:AI-0125-1]: Collect all the visible parents and progenitors
@@ -3359,12 +3362,16 @@ package Sem_Util is
    --  is potentially issued: it is the visible entity in the former case, and
    --  the use_clause in the latter case.
 
-   procedure Wrong_Type (Expr : Node_Id; Expected_Type : Entity_Id);
+   procedure Wrong_Type
+     (Expr          : Node_Id;
+      Expected_Type : Entity_Id;
+      Multiple      : Boolean := False);
    --  Output error message for incorrectly typed expression. Expr is the node
    --  for the incorrectly typed construct (Etype (Expr) is the type found),
    --  and Expected_Type is the entity for the expected type. Note that Expr
    --  does not have to be a subexpression, anything with an Etype field may
-   --  be used.
+   --  be used. If Multiple is False, do not output the message if an error
+   --  has already been posted for Expr.
 
    function Yields_Synchronized_Object (Typ : Entity_Id) return Boolean;
    --  Determine whether type Typ "yields synchronized object" as specified by

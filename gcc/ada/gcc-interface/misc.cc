@@ -267,9 +267,6 @@ gnat_post_options (const char **pfilename ATTRIBUTE_UNUSED)
   /* No return type warnings for Ada.  */
   warn_return_type = 0;
 
-  /* No string overflow warnings for Ada.  */
-  warn_stringop_overflow = 0;
-
   /* No caret by default for Ada.  */
   if (!OPTION_SET_P (flag_diagnostics_show_caret))
     global_dc->show_caret = false;
@@ -333,13 +330,23 @@ internal_error_function (diagnostic_context *context, const char *msgid,
   sp.Bounds = &temp;
   sp.Array = buffer;
 
-  xloc = expand_location (input_location);
-  if (context->show_column && xloc.column != 0)
-    loc = xasprintf ("%s:%d:%d", xloc.file, xloc.line, xloc.column);
+  if (input_location == UNKNOWN_LOCATION)
+    {
+      loc = NULL;
+      temp_loc.Low_Bound = 1;
+      temp_loc.High_Bound = 0;
+    }
   else
-    loc = xasprintf ("%s:%d", xloc.file, xloc.line);
-  temp_loc.Low_Bound = 1;
-  temp_loc.High_Bound = strlen (loc);
+    {
+      xloc = expand_location (input_location);
+      if (context->show_column && xloc.column != 0)
+	loc = xasprintf ("%s:%d:%d", xloc.file, xloc.line, xloc.column);
+      else
+	loc = xasprintf ("%s:%d", xloc.file, xloc.line);
+      temp_loc.Low_Bound = 1;
+      temp_loc.High_Bound = strlen (loc);
+    }
+
   sp_loc.Bounds = &temp_loc;
   sp_loc.Array = loc;
 
@@ -767,7 +774,7 @@ gnat_get_array_descr_info (const_tree const_type,
 {
   tree type = const_cast<tree> (const_type);
   tree first_dimen, dimen;
-  bool is_packed_array, is_array;
+  bool is_bit_packed_array, is_array;
   int i;
 
   /* Temporaries created in the first pass and used in the second one for thin
@@ -777,15 +784,15 @@ gnat_get_array_descr_info (const_tree const_type,
   tree thinptr_template_expr = NULL_TREE;
   tree thinptr_bound_field = NULL_TREE;
 
-  /* If we have an implementation type for a packed array, get the orignial
+  /* If we have an implementation type for a packed array, get the original
      array type.  */
   if (TYPE_IMPL_PACKED_ARRAY_P (type) && TYPE_ORIGINAL_PACKED_ARRAY (type))
     {
+      is_bit_packed_array = BIT_PACKED_ARRAY_TYPE_P (type);
       type = TYPE_ORIGINAL_PACKED_ARRAY (type);
-      is_packed_array = true;
     }
   else
-    is_packed_array = false;
+    is_bit_packed_array = false;
 
   /* First pass: gather all information about this array except everything
      related to dimensions.  */
@@ -843,8 +850,8 @@ gnat_get_array_descr_info (const_tree const_type,
      order, so our view here has reversed dimensions.  */
   const bool convention_fortran_p = TYPE_CONVENTION_FORTRAN_P (first_dimen);
 
-  if (TYPE_PACKED (first_dimen))
-    is_packed_array = true;
+  if (BIT_PACKED_ARRAY_TYPE_P (first_dimen))
+    is_bit_packed_array = true;
 
   /* ??? For row major ordering, we probably want to emit nothing and
      instead specify it as the default in Dw_TAG_compile_unit.  */
@@ -968,7 +975,7 @@ gnat_get_array_descr_info (const_tree const_type,
       /* We need to specify a bit stride when it does not correspond to the
 	 natural size of the contained elements.  ??? Note that we do not
 	 support packed records and nested packed arrays.  */
-      else if (is_packed_array)
+      else if (is_bit_packed_array)
 	{
 	  info->stride = get_array_bit_stride (info->element_type);
 	  info->stride_in_bits = true;

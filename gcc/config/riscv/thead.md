@@ -22,10 +22,9 @@
 (define_insn "*th_addsl<mode>4"
   [(set (match_operand:X 0 "register_operand" "=r")
 	(plus:X (ashift:X (match_operand:X 1 "register_operand" "r")
-			  (match_operand 2 "const_int_operand" "n"))
+			  (match_operand:QI 2 "imm123_operand" "Ds3"))
 		(match_operand:X 3 "register_operand" "r")))]
-  "TARGET_XTHEADBA
-   && (INTVAL (operands[2]) >= 0) && (INTVAL (operands[2]) <= 3)"
+  "TARGET_XTHEADBA"
   "th.addsl\t%0,%3,%1,%2"
   [(set_attr "type" "bitmanip")
    (set_attr "mode" "<X:MODE>")])
@@ -59,6 +58,28 @@
   [(set_attr "type" "bitmanip")
    (set_attr "mode" "<GPR:MODE>")])
 
+(define_insn "*extendhi<SUPERQI:mode>2_th_ext"
+  [(set (match_operand:SUPERQI 0 "register_operand" "=r,r")
+	(sign_extend:SUPERQI
+	    (match_operand:HI 1 "nonimmediate_operand" "r,m")))]
+  "TARGET_XTHEADBB"
+  "@
+   th.ext\t%0,%1,15,0
+   lh\t%0,%1"
+  [(set_attr "type" "bitmanip,load")
+   (set_attr "mode" "<SUPERQI:MODE>")])
+
+(define_insn "*extendqi<SUPERQI:mode>2_th_ext"
+  [(set (match_operand:SUPERQI 0 "register_operand" "=r,r")
+	(sign_extend:SUPERQI
+	    (match_operand:QI 1 "nonimmediate_operand" "r,m")))]
+  "TARGET_XTHEADBB"
+  "@
+   th.ext\t%0,%1,7,0
+   lb\t%0,%1"
+  [(set_attr "type" "bitmanip,load")
+   (set_attr "mode" "<SUPERQI:MODE>")])
+
 (define_insn "*th_extu<mode>4"
   [(set (match_operand:GPR 0 "register_operand" "=r")
 	(zero_extract:GPR (match_operand:GPR 1 "register_operand" "r")
@@ -70,6 +91,26 @@
   return "th.extu\t%0,%1,%2,%3";
 }
   [(set_attr "type" "bitmanip")
+   (set_attr "mode" "<GPR:MODE>")])
+
+(define_insn "*zero_extendsidi2_th_extu"
+  [(set (match_operand:DI 0 "register_operand" "=r,r")
+	(zero_extend:DI (match_operand:SI 1 "nonimmediate_operand" "r,m")))]
+  "TARGET_64BIT && TARGET_XTHEADBB"
+  "@
+   th.extu\t%0,%1,31,0
+   lwu\t%0,%1"
+  [(set_attr "type" "bitmanip,load")
+   (set_attr "mode" "DI")])
+
+(define_insn "*zero_extendhi<GPR:mode>2_th_extu"
+  [(set (match_operand:GPR 0 "register_operand" "=r,r")
+	(zero_extend:GPR (match_operand:HI 1 "nonimmediate_operand" "r,m")))]
+  "TARGET_XTHEADBB"
+  "@
+   th.extu\t%0,%1,15,0
+   lhu\t%0,%1"
+  [(set_attr "type" "bitmanip,load")
    (set_attr "mode" "<GPR:MODE>")])
 
 (define_insn "*th_clz<mode>2"
@@ -120,22 +161,9 @@
   /* Invert the condition and take else-block.  */
   rtx_code code = GET_CODE (operands[4]);
   code = (code == EQ) ? NE : EQ;
-  operands[4] = gen_rtx_fmt_ee (code, VOIDmode, const0_rtx, const0_rtx);
+  operands[4] = gen_rtx_fmt_ee (code, VOIDmode, operands[1], const0_rtx);
   return "th.mv%C4z\t%0,%z3,%1";
 }
-  [(set_attr "type" "condmove")
-   (set_attr "mode" "<GPR:MODE>")])
-
-(define_insn "*th_cond_gpr_mov<GPR:mode><GPR2:mode>"
-  [(set (match_operand:GPR 0 "register_operand" "=r,r")
-	(if_then_else:GPR
-	 (match_operand:GPR2 1 "register_operand" "r,r")
-	 (match_operand:GPR 2 "reg_or_0_operand" "rJ,0")
-	 (match_operand:GPR 3 "reg_or_0_operand" "0,rJ")))]
-  "TARGET_XTHEADCONDMOV"
-  "@
-   th.mvnez\t%0,%z2,%1
-   th.mveqz\t%0,%z3,%1"
   [(set_attr "type" "condmove")
    (set_attr "mode" "<GPR:MODE>")])
 
@@ -344,3 +372,5 @@
   [(set_attr "move_type" "load")
    (set_attr "mode" "DI")
    (set_attr "length" "8")])
+
+(include "thead-peephole.md")

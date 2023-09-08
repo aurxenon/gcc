@@ -5312,7 +5312,8 @@ h8300_rtx_ok_for_base_p (rtx x, int strict)
    CONSTANT_ADDRESS.  */
 
 static bool
-h8300_legitimate_address_p (machine_mode mode, rtx x, bool strict)
+h8300_legitimate_address_p (machine_mode mode, rtx x, bool strict,
+			    code_helper = ERROR_MARK)
 {
   /* The register indirect addresses like @er0 is always valid.  */
   if (h8300_rtx_ok_for_base_p (x, strict))
@@ -5624,9 +5625,6 @@ pre_incdec_with_reg (rtx op, unsigned int reg)
 
 #undef TARGET_MODES_TIEABLE_P
 #define TARGET_MODES_TIEABLE_P h8300_modes_tieable_p
-
-#undef TARGET_LRA_P
-#define TARGET_LRA_P hook_bool_void_false
 
 #undef TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P	h8300_legitimate_address_p

@@ -1109,7 +1109,8 @@ check_narrowing (tree type, tree init, tsubst_flags_t complain,
       else if (complain & tf_error)
 	{
 	  int savederrorcount = errorcount;
-	  global_dc->pedantic_errors = 1;
+	  if (!flag_permissive)
+	    global_dc->pedantic_errors = 1;
 	  auto s = make_temp_override (global_dc->dc_warn_system_headers, true);
 	  pedwarn (loc, OPT_Wnarrowing,
 		   "narrowing conversion of %qE from %qH to %qI",
@@ -1873,7 +1874,8 @@ process_init_constructor_record (tree type, tree init, int nested, int flags,
 	     to zero.  */
 	  if ((complain & tf_warning)
 	      && !cp_unevaluated_operand
-	      && !EMPTY_CONSTRUCTOR_P (init))
+	      && !EMPTY_CONSTRUCTOR_P (init)
+	      && !is_really_empty_class (fldtype, /*ignore_vptr*/false))
 	    warning (OPT_Wmissing_field_initializers,
 		     "missing initializer for member %qD", field);
 

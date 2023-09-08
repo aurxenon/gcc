@@ -336,8 +336,23 @@ pp_get_prefix (const pretty_printer *pp) { return pp->prefix; }
 #define pp_wide_int(PP, W, SGN)					\
   do								\
     {								\
-      print_dec (W, pp_buffer (PP)->digit_buffer, SGN);		\
-      pp_string (PP, pp_buffer (PP)->digit_buffer);		\
+      const wide_int_ref &pp_wide_int_ref = (W);		\
+      unsigned int pp_wide_int_prec				\
+	= pp_wide_int_ref.get_precision ();			\
+      if ((pp_wide_int_prec + 3) / 4				\
+	  > sizeof (pp_buffer (PP)->digit_buffer) - 3)		\
+	{							\
+	  char *pp_wide_int_buf					\
+	    = XALLOCAVEC (char, (pp_wide_int_prec + 3) / 4 + 3);\
+	  print_dec (pp_wide_int_ref, pp_wide_int_buf, SGN);	\
+	  pp_string (PP, pp_wide_int_buf);			\
+	}							\
+      else							\
+	{							\
+	  print_dec (pp_wide_int_ref,				\
+		     pp_buffer (PP)->digit_buffer, SGN);	\
+	  pp_string (PP, pp_buffer (PP)->digit_buffer);		\
+	}							\
     }								\
   while (0)
 #define pp_vrange(PP, R)					\
@@ -401,6 +416,7 @@ extern void pp_indent (pretty_printer *);
 extern void pp_newline (pretty_printer *);
 extern void pp_character (pretty_printer *, int);
 extern void pp_string (pretty_printer *, const char *);
+extern void pp_unicode_character (pretty_printer *, unsigned);
 
 extern void pp_write_text_to_stream (pretty_printer *);
 extern void pp_write_text_as_dot_label_to_stream (pretty_printer *, bool);

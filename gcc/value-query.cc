@@ -33,27 +33,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-range.h"
 #include "value-range-storage.h"
 
-// value_query default methods.
-
-tree
-value_query::value_on_edge (edge, tree expr)
-{
-  return value_of_expr (expr);
-}
-
-tree
-value_query::value_of_stmt (gimple *stmt, tree name)
-{
-  if (!name)
-    name = gimple_get_lhs (stmt);
-
-  gcc_checking_assert (!name || name == gimple_get_lhs (stmt));
-
-  if (name)
-    return value_of_expr (name);
-  return NULL_TREE;
-}
-
 // range_query default methods.
 
 bool
@@ -228,8 +207,7 @@ range_query::get_tree_range (vrange &r, tree expr, gimple *stmt)
       if (COMPARISON_CLASS_P (expr)
 	  && !Value_Range::supports_type_p (TREE_TYPE (op0)))
 	return false;
-      range_op_handler op (TREE_CODE (expr),
-			   BINARY_CLASS_P (expr) ? type : TREE_TYPE (op0));
+      range_op_handler op (TREE_CODE (expr));
       if (op)
 	{
 	  Value_Range r0 (TREE_TYPE (op0));
@@ -245,7 +223,7 @@ range_query::get_tree_range (vrange &r, tree expr, gimple *stmt)
     }
   if (UNARY_CLASS_P (expr))
     {
-      range_op_handler op (TREE_CODE (expr), type);
+      range_op_handler op (TREE_CODE (expr));
       tree op0_type = TREE_TYPE (TREE_OPERAND (expr, 0));
       if (op && Value_Range::supports_type_p (op0_type))
 	{

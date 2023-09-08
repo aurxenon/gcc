@@ -579,6 +579,10 @@ maybe_instantiate_nsdmi_init (tree member, tsubst_flags_t complain)
   /* tsubst_decl uses void_node to indicate an uninstantiated DMI.  */
   if (init == void_node)
     {
+      /* Clear any special tsubst flags; the result of NSDMI instantiation
+	 should be independent of the substitution context.  */
+      complain &= tf_warning_or_error;
+
       init = DECL_INITIAL (DECL_TI_TEMPLATE (member));
       location_t expr_loc
 	= cp_expr_loc_or_loc (init, DECL_SOURCE_LOCATION (member));
@@ -4112,8 +4116,8 @@ build_vec_delete_1 (location_t loc, tree base, tree maxindex, tree type,
       if (type_build_dtor_call (type))
 	{
 	  tmp = build_delete (loc, ptype, base, sfk_complete_destructor,
-			      LOOKUP_NORMAL|LOOKUP_DESTRUCTOR, 1,
-			      complain);
+			      LOOKUP_NORMAL|LOOKUP_DESTRUCTOR|LOOKUP_NONVIRTUAL,
+			      1, complain);
 	  if (tmp == error_mark_node)
 	    return error_mark_node;
 	}
@@ -4142,9 +4146,12 @@ build_vec_delete_1 (location_t loc, tree base, tree maxindex, tree type,
   if (tmp == error_mark_node)
     return error_mark_node;
   body = build_compound_expr (loc, body, tmp);
+  /* [expr.delete]/3: "In an array delete expression, if the dynamic type of
+     the object to be deleted is not similar to its static type, the behavior
+     is undefined."  So we can set LOOKUP_NONVIRTUAL.  */
   tmp = build_delete (loc, ptype, tbase, sfk_complete_destructor,
-		      LOOKUP_NORMAL|LOOKUP_DESTRUCTOR, 1,
-		      complain);
+		      LOOKUP_NORMAL|LOOKUP_DESTRUCTOR|LOOKUP_NONVIRTUAL,
+		      1, complain);
   if (tmp == error_mark_node)
     return error_mark_node;
   body = build_compound_expr (loc, body, tmp);
@@ -4475,7 +4482,9 @@ build_vec_init (tree base, tree maxindex, tree init,
   /* Look through the TARGET_EXPR around a compound literal.  */
   if (init && TREE_CODE (init) == TARGET_EXPR
       && TREE_CODE (TARGET_EXPR_INITIAL (init)) == CONSTRUCTOR
-      && from_array != 2)
+      && from_array != 2
+      && (same_type_ignoring_top_level_qualifiers_p
+	  (TREE_TYPE (init), atype)))
     init = TARGET_EXPR_INITIAL (init);
 
   if (tree vi = get_vec_init_expr (init))
@@ -4601,7 +4610,14 @@ build_vec_init (tree base, tree maxindex, tree init,
     {
       if (lvalue_kind (init) & clk_rvalueref)
 	xvalue = true;
-      base2 = decay_conversion (init, complain);
+      if (TREE_CODE (init) == TARGET_EXPR)
+	{
+	  /* Avoid error in decay_conversion.  */
+	  base2 = decay_conversion (TARGET_EXPR_SLOT (init), complain);
+	  base2 = cp_build_compound_expr (init, base2, tf_none);
+	}
+      else
+	base2 = decay_conversion (init, complain);
       if (base2 == error_mark_node)
 	return error_mark_node;
       itype = TREE_TYPE (base2);
@@ -4837,7 +4853,7 @@ build_vec_init (tree base, tree maxindex, tree init,
       finish_init_stmt (for_stmt);
       finish_for_cond (build2 (GT_EXPR, boolean_type_node, iterator,
 			       build_int_cst (TREE_TYPE (iterator), -1)),
-		       for_stmt, false, 0);
+		       for_stmt, false, 0, false);
       /* We used to pass this decrement to finish_for_expr; now we add it to
 	 elt_init below so it's part of the same full-expression as the
 	 initialization, and thus happens before any potentially throwing

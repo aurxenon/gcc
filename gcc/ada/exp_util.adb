@@ -1853,7 +1853,15 @@ package body Exp_Util is
 
       begin
          pragma Assert (Present (DIC_Expr));
-         Expr := New_Copy_Tree (DIC_Expr);
+
+         --  We need to preanalyze the expression itself inside a generic to
+         --  be able to capture global references present in it.
+
+         if Inside_A_Generic then
+            Expr := DIC_Expr;
+         else
+            Expr := New_Copy_Tree (DIC_Expr);
+         end if;
 
          --  Perform the following substitution:
 
@@ -3111,7 +3119,14 @@ package body Exp_Util is
                   return;
                end if;
 
-               Expr := New_Copy_Tree (Prag_Expr);
+               --  We need to preanalyze the expression itself inside a generic
+               --  to be able to capture global references present in it.
+
+               if Inside_A_Generic then
+                  Expr := Prag_Expr;
+               else
+                  Expr := New_Copy_Tree (Prag_Expr);
+               end if;
 
                --  Substitute all references to type T with references to the
                --  _object formal parameter.
@@ -4944,7 +4959,10 @@ package body Exp_Util is
    -- Component_May_Be_Bit_Aligned --
    ----------------------------------
 
-   function Component_May_Be_Bit_Aligned (Comp : Entity_Id) return Boolean is
+   function Component_May_Be_Bit_Aligned
+     (Comp      : Entity_Id;
+      For_Slice : Boolean := False) return Boolean
+   is
       UT : Entity_Id;
 
    begin
@@ -4965,11 +4983,12 @@ package body Exp_Util is
 
       --  If we know that we have a small (at most the maximum integer size)
       --  record or bit-packed array, then everything is fine, since the back
-      --  end can handle these cases correctly.
+      --  end can handle these cases correctly, except if a slice is involved.
 
       elsif Known_Esize (Comp)
         and then Esize (Comp) <= System_Max_Integer_Size
         and then (Is_Record_Type (UT) or else Is_Bit_Packed_Array (UT))
+        and then not For_Slice
       then
          return False;
 
@@ -6272,6 +6291,12 @@ package body Exp_Util is
 
       Typ := Underlying_Type (Typ);
 
+      --  We cannot find the operation if there is no full view available
+
+      if No (Typ) then
+         return Empty;
+      end if;
+
       --  Loop through primitive operations
 
       Prim := First_Elmt (Primitive_Operations (Typ));
@@ -7268,6 +7293,7 @@ package body Exp_Util is
             when N_Indexed_Component
               |  N_Selected_Component
               |  N_Aggregate
+              |  N_Extension_Aggregate
             =>
                return True;
 
@@ -8323,6 +8349,13 @@ package body Exp_Util is
       function Is_Allocated (Trans_Id : Entity_Id) return Boolean;
       --  Determine whether transient object Trans_Id is allocated on the heap
 
+      function Is_Indexed_Container
+        (Trans_Id   : Entity_Id;
+         First_Stmt : Node_Id) return Boolean;
+      --  Determine whether transient object Trans_Id denotes a container which
+      --  is in the process of being indexed in the statement list starting
+      --  from First_Stmt.
+
       function Is_Iterated_Container
         (Trans_Id   : Entity_Id;
          First_Stmt : Node_Id) return Boolean;
@@ -8597,6 +8630,91 @@ package body Exp_Util is
              and then Nkind (Expr) = N_Allocator;
       end Is_Allocated;
 
+      --------------------------
+      -- Is_Indexed_Container --
+      --------------------------
+
+      function Is_Indexed_Container
+        (Trans_Id   : Entity_Id;
+         First_Stmt : Node_Id) return Boolean
+      is
+         Aspect : Node_Id;
+         Call   : Node_Id;
+         Index  : Entity_Id;
+         Param  : Node_Id;
+         Stmt   : Node_Id;
+         Typ    : Entity_Id;
+
+      begin
+         --  It is not possible to iterate over containers in non-Ada 2012 code
+
+         if Ada_Version < Ada_2012 then
+            return False;
+         end if;
+
+         Typ := Etype (Trans_Id);
+
+         --  Handle access type created for the reference below
+
+         if Is_Access_Type (Typ) then
+            Typ := Designated_Type (Typ);
+         end if;
+
+         --  Look for aspect Constant_Indexing. It may be part of a type
+         --  declaration for a container, or inherited from a base type
+         --  or parent type.
+
+         Aspect := Find_Value_Of_Aspect (Typ, Aspect_Constant_Indexing);
+
+         if Present (Aspect) then
+            Index := Entity (Aspect);
+
+            --  Examine the statements following the container object and
+            --  look for a call to the default indexing routine where the
+            --  first parameter is the transient. Such a call appears as:
+
+            --     It : Access_To_Constant_Reference_Type :=
+            --            Constant_Indexing (Tran_Id.all, ...)'reference;
+
+            Stmt := First_Stmt;
+            while Present (Stmt) loop
+
+               --  Detect an object declaration which is initialized by a
+               --  controlled function call.
+
+               if Nkind (Stmt) = N_Object_Declaration
+                 and then Present (Expression (Stmt))
+                 and then Nkind (Expression (Stmt)) = N_Reference
+                 and then Nkind (Prefix (Expression (Stmt))) = N_Function_Call
+               then
+                  Call := Prefix (Expression (Stmt));
+
+                  --  The call must invoke the default indexing routine of
+                  --  the container and the transient object must appear as
+                  --  the first actual parameter. Skip any calls whose names
+                  --  are not entities.
+
+                  if Is_Entity_Name (Name (Call))
+                    and then Entity (Name (Call)) = Index
+                    and then Present (Parameter_Associations (Call))
+                  then
+                     Param := First (Parameter_Associations (Call));
+
+                     if Nkind (Param) = N_Explicit_Dereference
+                       and then Entity (Prefix (Param)) = Trans_Id
+                     then
+                        return True;
+                     end if;
+                  end if;
+               end if;
+
+               Next (Stmt);
+            end loop;
+         end if;
+
+         return False;
+      end Is_Indexed_Container;
+
       ---------------------------
       -- Is_Iterated_Container --
       ---------------------------
@@ -8621,7 +8739,7 @@ package body Exp_Util is
 
          Typ := Etype (Trans_Id);
 
-         --  Handle access type created for secondary stack use
+         --  Handle access type created for the reference below
 
          if Is_Access_Type (Typ) then
             Typ := Designated_Type (Typ);
@@ -8647,7 +8765,7 @@ package body Exp_Util is
             while Present (Stmt) loop
 
                --  Detect an object declaration which is initialized by a
-               --  secondary stack function call.
+               --  controlled function call.
 
                if Nkind (Stmt) = N_Object_Declaration
                  and then Present (Expression (Stmt))
@@ -8766,7 +8884,11 @@ package body Exp_Util is
           --  transient objects must exist for as long as the loop is around,
           --  otherwise any operation carried out by the iterator will fail.
 
-          and then not Is_Iterated_Container (Obj_Id, Decl);
+          and then not Is_Iterated_Container (Obj_Id, Decl)
+
+          --  Likewise for indexed containers in the context of iterator loops
+
+          and then not Is_Indexed_Container (Obj_Id, Decl);
    end Is_Finalizable_Transient;
 
    ---------------------------------
@@ -9806,11 +9928,16 @@ package body Exp_Util is
    -------------------------
 
    function Make_Invariant_Call (Expr : Node_Id) return Node_Id is
-      Loc : constant Source_Ptr := Sloc (Expr);
-      Typ : constant Entity_Id  := Base_Type (Etype (Expr));
+      Loc      : constant Source_Ptr := Sloc (Expr);
+      Typ      : constant Entity_Id  := Base_Type (Etype (Expr));
       pragma Assert (Has_Invariants (Typ));
-      Proc_Id : constant Entity_Id := Invariant_Procedure (Typ);
+      Proc_Id  : constant Entity_Id := Invariant_Procedure (Typ);
       pragma Assert (Present (Proc_Id));
+      Inv_Typ  : constant Entity_Id
+                   := Base_Type (Etype (First_Formal (Proc_Id)));
+
+      Arg : Node_Id;
+
    begin
       --  The invariant procedure has a null body if assertions are disabled or
       --  Assertion_Policy Ignore is in effect. In that case, generate a null
@@ -9818,11 +9945,21 @@ package body Exp_Util is
 
       if Has_Null_Body (Proc_Id) then
          return Make_Null_Statement (Loc);
+
       else
+         --  As done elsewhere, for example in Build_Initialization_Call, we
+         --  may need to bridge the gap between views of the type.
+
+         if Inv_Typ /= Typ then
+            Arg := OK_Convert_To (Inv_Typ, Expr);
+         else
+            Arg := Relocate_Node (Expr);
+         end if;
+
          return
            Make_Procedure_Call_Statement (Loc,
              Name                   => New_Occurrence_Of (Proc_Id, Loc),
-             Parameter_Associations => New_List (Relocate_Node (Expr)));
+             Parameter_Associations => New_List (Arg));
       end if;
    end Make_Invariant_Call;
 
@@ -9994,6 +10131,8 @@ package body Exp_Util is
 
       --  Compute proper name to use, we need to get this right so that the
       --  right set of check policies apply to the Check pragma we are making.
+      --  The presence or not of a Ghost_Predicate does not influence the
+      --  choice of the applicable check policy.
 
       if Has_Dynamic_Predicate_Aspect (Typ) then
          Nam := Name_Dynamic_Predicate;
@@ -10221,6 +10360,33 @@ package body Exp_Util is
             Make_Index_Or_Discriminant_Constraint (Loc,
               Constraints => List_Constr));
    end Make_Subtype_From_Expr;
+
+   -----------------------------------
+   -- Make_Tag_Assignment_From_Type --
+   -----------------------------------
+
+   function Make_Tag_Assignment_From_Type
+     (Loc    : Source_Ptr;
+      Target : Node_Id;
+      Typ    : Entity_Id) return Node_Id
+   is
+      Nam : constant Node_Id :=
+              Make_Selected_Component (Loc,
+                Prefix => Target,
+                Selector_Name =>
+                  New_Occurrence_Of (First_Tag_Component (Typ), Loc));
+
+   begin
+      Set_Assignment_OK (Nam);
+
+      return
+        Make_Assignment_Statement (Loc,
+          Name       => Nam,
+          Expression =>
+            Unchecked_Convert_To (RTE (RE_Tag),
+              New_Occurrence_Of
+                (Node (First_Elmt (Access_Disp_Table (Typ))), Loc)));
+   end Make_Tag_Assignment_From_Type;
 
    -----------------------------
    -- Make_Variant_Comparison --
@@ -11177,7 +11343,10 @@ package body Exp_Util is
    -- Possible_Bit_Aligned_Component --
    ------------------------------------
 
-   function Possible_Bit_Aligned_Component (N : Node_Id) return Boolean is
+   function Possible_Bit_Aligned_Component
+     (N         : Node_Id;
+      For_Slice : Boolean := False) return Boolean
+   is
    begin
       --  Do not process an unanalyzed node because it is not yet decorated and
       --  most checks performed below will fail.
@@ -11215,7 +11384,7 @@ package body Exp_Util is
                --  indexing from a possibly unaligned component.
 
                else
-                  return Possible_Bit_Aligned_Component (P);
+                  return Possible_Bit_Aligned_Component (P, For_Slice);
                end if;
             end;
 
@@ -11230,14 +11399,14 @@ package body Exp_Util is
                --  This is the crucial test: if the component itself causes
                --  trouble, then we can stop and return True.
 
-               if Component_May_Be_Bit_Aligned (Comp) then
+               if Component_May_Be_Bit_Aligned (Comp, For_Slice) then
                   return True;
 
                --  Otherwise, we need to test the prefix, to see if we are
                --  selecting from a possibly unaligned component.
 
                else
-                  return Possible_Bit_Aligned_Component (P);
+                  return Possible_Bit_Aligned_Component (P, For_Slice);
                end if;
             end;
 
@@ -11245,13 +11414,13 @@ package body Exp_Util is
          --  then for sure the slice is.
 
          when N_Slice =>
-            return Possible_Bit_Aligned_Component (Prefix (N));
+            return Possible_Bit_Aligned_Component (Prefix (N), True);
 
          --  For an unchecked conversion, check whether the expression may
          --  be bit aligned.
 
          when N_Unchecked_Type_Conversion =>
-            return Possible_Bit_Aligned_Component (Expression (N));
+            return Possible_Bit_Aligned_Component (Expression (N), For_Slice);
 
          --  If we have none of the above, it means that we have fallen off the
          --  top testing prefixes recursively, and we now have a stand alone
@@ -11259,15 +11428,11 @@ package body Exp_Util is
          --  in which case we need to look into the renamed object.
 
          when others =>
-            if Is_Entity_Name (N)
+            return Is_Entity_Name (N)
               and then Is_Object (Entity (N))
               and then Present (Renamed_Object (Entity (N)))
-            then
-               return
-                 Possible_Bit_Aligned_Component (Renamed_Object (Entity (N)));
-            else
-               return False;
-            end if;
+              and then Possible_Bit_Aligned_Component
+                         (Renamed_Object (Entity (N)), For_Slice);
       end case;
    end Possible_Bit_Aligned_Component;
 
@@ -11734,14 +11899,6 @@ package body Exp_Util is
 
       elsif No (Exp_Type)
         or else Ekind (Exp_Type) = E_Access_Attribute_Type
-      then
-         return;
-
-      --  Nothing to do if prior expansion determined that a function call does
-      --  not require side effect removal.
-
-      elsif Nkind (Exp) = N_Function_Call
-        and then No_Side_Effect_Removal (Exp)
       then
          return;
 
@@ -14089,6 +14246,16 @@ package body Exp_Util is
          if Nkind (Original_Node (Par)) in N_Case_Expression | N_If_Expression
          then
             return True;
+
+         --  Stop at contexts where temporaries may be contained
+
+         elsif Nkind (Par) in N_Aggregate
+                            | N_Delta_Aggregate
+                            | N_Extension_Aggregate
+                            | N_Block_Statement
+                            | N_Loop_Statement
+         then
+            return False;
 
          --  Prevent the search from going too far
 

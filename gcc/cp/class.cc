@@ -344,7 +344,7 @@ build_base_path (enum tree_code code,
 
   bool uneval = (cp_unevaluated_operand != 0
 		 || processing_template_decl
-		 || in_template_function ());
+		 || in_template_context);
 
   /* For a non-pointer simple base reference, express it as a COMPONENT_REF
      without taking its address (and so causing lambda capture, 91933).  */
@@ -4053,9 +4053,33 @@ check_subobject_offset (tree type, tree offset, splay_tree offsets)
   if (!n)
     return 0;
 
+  enum { ignore, fast, slow, warn }
+  cv_check = (abi_version_crosses (19) ? slow
+	      : abi_version_at_least (19) ? fast
+	      : ignore);
   for (t = (tree) n->value; t; t = TREE_CHAIN (t))
-    if (same_type_p (TREE_VALUE (t), type))
-      return 1;
+    {
+      tree elt = TREE_VALUE (t);
+
+      if (same_type_p (elt, type))
+	return 1;
+
+      if (cv_check != ignore
+	  && same_type_ignoring_top_level_qualifiers_p (elt, type))
+	{
+	  if (cv_check == fast)
+	    return 1;
+	  cv_check = warn;
+	}
+    }
+
+  if (cv_check == warn)
+    {
+      warning (OPT_Wabi, "layout of %qs member of type %qT changes in %qs",
+	       "[[no_unique_address]]", type, "-fabi-version=19");
+      if (abi_version_at_least (19))
+	return 1;
+    }
 
   return 0;
 }
@@ -8055,7 +8079,7 @@ resolves_to_fixed_type_p (tree instance, int* nonnull)
   /* processing_template_decl can be false in a template if we're in
      instantiate_non_dependent_expr, but we still want to suppress
      this check.  */
-  if (in_template_function ())
+  if (in_template_context)
     {
       /* In a template we only care about the type of the result.  */
       if (nonnull)

@@ -132,7 +132,6 @@ AS_IF([test "x$enable_werror" != "xno" && test "x$GCC" = "xyes"],
 # Find other programs we need.
 AC_CHECK_TOOL(AR, ar)
 AC_CHECK_TOOL(RANLIB, ranlib, ranlib-not-found-in-path-error)
-AC_PATH_PROG(PERL, perl, perl-not-found-in-path-error)
 AC_PROG_MAKE_SET
 AC_PROG_INSTALL
 
@@ -350,7 +349,12 @@ fi
 AX_COUNT_CPUS
 AC_SUBST(CPU_COUNT)
 
+AC_MSG_NOTICE([checking for flock implementation])
 AC_CHECK_PROGS(FLOCK, flock)
+# Fallback if 'perl' is available.
+if test -z "$FLOCK"; then
+  AC_CHECK_PROG(FLOCK, perl, $srcdir/testsuite/flock)
+fi
 
 # Get target configury.
 . ${srcdir}/configure.tgt

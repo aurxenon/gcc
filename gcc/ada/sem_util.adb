@@ -132,9 +132,6 @@ package body Sem_Util is
    --  Determine whether arbitrary entity Id denotes an atomic object as per
    --  RM C.6(7).
 
-   function Is_Container_Aggregate (Exp : Node_Id) return Boolean;
-   --  Is the given expression a container aggregate?
-
    generic
       with function Is_Effectively_Volatile_Entity
         (Id : Entity_Id) return Boolean;
@@ -961,10 +958,11 @@ package body Sem_Util is
          if Is_Generic_Actual_Type (Typ) then
 
             --  The restriction on loop parameters is only that the type
-            --  should have no dynamic predicates.
+            --  should only have static predicates.
 
             if Nkind (Parent (N)) = N_Loop_Parameter_Specification
               and then not Has_Dynamic_Predicate_Aspect (Typ)
+              and then not Has_Ghost_Predicate_Aspect (Typ)
               and then Is_OK_Static_Subtype (Typ)
             then
                return;
@@ -998,6 +996,7 @@ package body Sem_Util is
          --  if the predicate is static.
 
          if not Has_Dynamic_Predicate_Aspect (Typ)
+           and then not Has_Ghost_Predicate_Aspect (Typ)
            and then Has_Static_Predicate (Typ)
            and then Nkind (N) = N_Attribute_Reference
          then
@@ -2885,9 +2884,7 @@ package body Sem_Util is
                   Collect_Identifiers (Right_Opnd (N));
                end if;
 
-               if Nkind (N) in N_In | N_Not_In
-                 and then Present (Alternatives (N))
-               then
+               if Nkind (N) in N_Membership_Test then
                   Expr := First (Alternatives (N));
                   while Present (Expr) loop
                      Collect_Identifiers (Expr);
@@ -2901,6 +2898,10 @@ package body Sem_Util is
             declare
                function Get_Record_Part (N : Node_Id) return Node_Id;
                --  Return the record part of this record type definition
+
+               ---------------------
+               -- Get_Record_Part --
+               ---------------------
 
                function Get_Record_Part (N : Node_Id) return Node_Id is
                   Type_Def : constant Node_Id := Type_Definition (N);
@@ -3296,9 +3297,7 @@ package body Sem_Util is
                               & "in unspecified order",
                               Node (Elmt_2));
 
-                        when N_In
-                           | N_Not_In
-                        =>
+                        when N_Membership_Test =>
                            Error_Msg_N
                              ("value may be affected by call in other "
                               & "alternative because they are evaluated "
@@ -3310,7 +3309,7 @@ package body Sem_Util is
                              ("value of actual may be affected by call in "
                               & "other actual because they are evaluated "
                               & "in unspecified order",
-                           Node (Elmt_2));
+                              Node (Elmt_2));
                      end case;
                   end if;
 
@@ -4546,13 +4545,12 @@ package body Sem_Util is
       --  Local variables
 
       Items        : constant Node_Id := Contract (Subp_Id);
-      Subp_Decl    : constant Node_Id := Unit_Declaration_Node (Subp_Id);
       Case_Prag    : Node_Id := Empty;
       Post_Prag    : Node_Id := Empty;
       Prag         : Node_Id;
       Seen_In_Case : Boolean := False;
       Seen_In_Post : Boolean := False;
-      Spec_Id      : Entity_Id;
+      Spec_Id      : constant Entity_Id := Unique_Entity (Subp_Id);
 
    --  Start of processing for Check_Result_And_Post_State
 
@@ -4568,22 +4566,38 @@ package body Sem_Util is
 
       elsif No (Items) then
          return;
-      end if;
 
-      --  Retrieve the entity of the subprogram spec (if any)
+      --  If the subprogram has a contract Exceptional_Cases, it is often
+      --  useful to refer only to the pre-state in the postcondition, to
+      --  indicate when the subprogram might terminate normally.
 
-      if Nkind (Subp_Decl) = N_Subprogram_Body
-        and then Present (Corresponding_Spec (Subp_Decl))
-      then
-         Spec_Id := Corresponding_Spec (Subp_Decl);
+      elsif Present (Get_Pragma (Subp_Id, Pragma_Exceptional_Cases)) then
+         return;
 
-      elsif Nkind (Subp_Decl) = N_Subprogram_Body_Stub
-        and then Present (Corresponding_Spec_Of_Stub (Subp_Decl))
-      then
-         Spec_Id := Corresponding_Spec_Of_Stub (Subp_Decl);
+      --  Same if the subprogram has a contract Always_Terminates => Cond,
+      --  where Cond is not syntactically True.
 
       else
-         Spec_Id := Subp_Id;
+         declare
+            Prag : constant Node_Id :=
+              Get_Pragma (Subp_Id, Pragma_Always_Terminates);
+         begin
+            if Present (Prag)
+              and then Present (Pragma_Argument_Associations (Prag))
+            then
+               declare
+                  Cond : constant Node_Id :=
+                    Get_Pragma_Arg
+                      (First (Pragma_Argument_Associations (Prag)));
+               begin
+                  if not Compile_Time_Known_Value (Cond)
+                    or else not Is_True (Expr_Value (Cond))
+                  then
+                     return;
+                  end if;
+               end;
+            end if;
+         end;
       end if;
 
       --  Examine all postconditions for attribute 'Result and a post-state
@@ -4644,7 +4658,8 @@ package body Sem_Util is
       --  attribute 'Result.
 
       elsif Present (Case_Prag) and then not Seen_In_Case then
-         Error_Msg_N ("contract cases do not mention result?.t?", Case_Prag);
+         Error_Msg_N
+           ("contract cases do not mention function result?.t?", Case_Prag);
 
       --  The function has non-trivial postconditions only and they do not
       --  mention attribute 'Result.
@@ -12257,32 +12272,25 @@ package body Sem_Util is
    begin
       --  For selected components, the subtype of the selector must be a
       --  constrained Unchecked_Union. If the component is subject to a
-      --  per-object constraint, then the enclosing object must have inferable
-      --  discriminants.
+      --  per-object constraint, then the enclosing object must either be
+      --  a regular discriminated type or must have inferable discriminants.
 
       if Nkind (N) = N_Selected_Component then
-         if Has_Per_Object_Constraint (Entity (Selector_Name (N))) then
-
-            --  A small hack. If we have a per-object constrained selected
-            --  component of a formal parameter, return True since we do not
-            --  know the actual parameter association yet.
-
-            if Prefix_Is_Formal_Parameter (N) then
-               return True;
-
-            --  Otherwise, check the enclosing object and the selector
-
-            else
-               return Has_Inferable_Discriminants (Prefix (N))
-                 and then Has_Inferable_Discriminants (Selector_Name (N));
-            end if;
-
          --  The call to Has_Inferable_Discriminants will determine whether
          --  the selector has a constrained Unchecked_Union nominal type.
 
-         else
-            return Has_Inferable_Discriminants (Selector_Name (N));
+         if not Has_Inferable_Discriminants (Selector_Name (N)) then
+            return False;
          end if;
+
+         --  A small hack. If we have a per-object constrained selected
+         --  component of a formal parameter, return True since we do not
+         --  know the actual parameter association yet.
+
+         return not Has_Per_Object_Constraint (Entity (Selector_Name (N)))
+           or else not Is_Unchecked_Union (Etype (Prefix (N)))
+           or else Has_Inferable_Discriminants (Prefix (N))
+           or else Prefix_Is_Formal_Parameter (N);
 
       --  A qualified expression has inferable discriminants if its subtype
       --  mark is a constrained Unchecked_Union subtype.
@@ -12295,7 +12303,7 @@ package body Sem_Util is
       --  Unchecked_Union nominal subtype.
 
       else
-         return Is_Unchecked_Union (Base_Type (Etype (N)))
+         return Is_Unchecked_Union (Etype (N))
            and then Is_Constrained (Etype (N));
       end if;
    end Has_Inferable_Discriminants;
@@ -14665,7 +14673,10 @@ package body Sem_Util is
    -- Inherit_Predicate_Flags --
    -----------------------------
 
-   procedure Inherit_Predicate_Flags (Subt, Par : Entity_Id) is
+   procedure Inherit_Predicate_Flags
+     (Subt, Par  : Entity_Id;
+      Only_Flags : Boolean := False)
+   is
    begin
       if Ada_Version < Ada_2012
         or else Present (Predicate_Function (Subt))
@@ -14678,6 +14689,8 @@ package body Sem_Util is
         (Subt, Has_Static_Predicate_Aspect (Par));
       Set_Has_Dynamic_Predicate_Aspect
         (Subt, Has_Dynamic_Predicate_Aspect (Par));
+      Set_Has_Ghost_Predicate_Aspect
+        (Subt, Has_Ghost_Predicate_Aspect (Par));
 
       --  A named subtype does not inherit the predicate function of its
       --  parent but an itype declared for a loop index needs the discrete
@@ -14685,7 +14698,10 @@ package body Sem_Util is
       --  A non-discrete type may has a static predicate (for example True)
       --  but has no static_discrete_predicate.
 
-      if Is_Itype (Subt) and then Present (Predicate_Function (Par)) then
+      if not Only_Flags
+        and then Is_Itype (Subt)
+        and then Present (Predicate_Function (Par))
+      then
          Set_Subprograms_For_Type (Subt, Subprograms_For_Type (Par));
 
          if Has_Static_Predicate (Par) and then Is_Discrete_Type (Par) then
@@ -16162,9 +16178,25 @@ package body Sem_Util is
    -----------------------------
 
    function Is_CPP_Constructor_Call (N : Node_Id) return Boolean is
+      Ret_Typ : Entity_Id;
+
    begin
-      return Nkind (N) = N_Function_Call
-        and then Is_CPP_Class (Etype (Etype (N)))
+      if Nkind (N) /= N_Function_Call then
+         return False;
+      end if;
+
+      Ret_Typ := Base_Type (Etype (N));
+
+      if Is_Class_Wide_Type (Ret_Typ) then
+         Ret_Typ := Root_Type (Ret_Typ);
+      end if;
+
+      if Is_Private_Type (Ret_Typ) then
+         Ret_Typ := Underlying_Type (Ret_Typ);
+      end if;
+
+      return Present (Ret_Typ)
+        and then Is_CPP_Class (Ret_Typ)
         and then Is_Constructor (Entity (Name (N)))
         and then Is_Imported (Entity (Name (N)));
    end Is_CPP_Constructor_Call;
@@ -17301,7 +17333,7 @@ package body Sem_Util is
                   declare
                      Init : constant Entity_Id :=
                               (Find_Optional_Prim_Op
-                                 (Underlying_Type (Typ), Name_Initialize));
+                                 (Utyp, Name_Initialize));
 
                   begin
                      if Present (Init)
@@ -17590,21 +17622,6 @@ package body Sem_Util is
         or else (Ekind (E) = E_Enumeration_Literal
                   and then Is_Derived_Type (Etype (E)));
    end Is_Inherited_Operation;
-
-   -------------------------------------
-   -- Is_Inherited_Operation_For_Type --
-   -------------------------------------
-
-   function Is_Inherited_Operation_For_Type
-     (E   : Entity_Id;
-      Typ : Entity_Id) return Boolean
-   is
-   begin
-      --  Check that the operation has been created by the type declaration
-
-      return Is_Inherited_Operation (E)
-        and then Defining_Identifier (Parent (E)) = Typ;
-   end Is_Inherited_Operation_For_Type;
 
    --------------------------------------
    -- Is_Inlinable_Expression_Function --
@@ -19590,7 +19607,8 @@ package body Sem_Util is
          elsif Nkind (Par) = N_Quantified_Expression then
             return Expr = Condition (Par);
 
-         elsif Nkind (Par) = N_Component_Association
+         elsif Nkind (Par) in N_Component_Association
+                            | N_Iterated_Component_Association
            and then Expr = Expression (Par)
            and then Nkind (Parent (Par))
               in N_Aggregate | N_Delta_Aggregate | N_Extension_Aggregate
@@ -19732,10 +19750,15 @@ package body Sem_Util is
          then
             return True;
 
-         --  For component associations continue climbing; it may be part of
-         --  an array aggregate.
+         --  For component associations continue climbing; it may be part of an
+         --  array aggregate. For iterated component association we know that
+         --  it belongs to an array aggreate, but only its expression is
+         --  potentially unevaluated, not discrete choice list or iterator
+         --  specification.
 
-         elsif Nkind (Par) = N_Component_Association then
+         elsif Nkind (Par) in N_Component_Association
+                            | N_Iterated_Component_Association
+         then
             null;
 
          --  If the context is not an expression, or if is the result of
@@ -20582,7 +20605,8 @@ package body Sem_Util is
          Nam := Pragma_Name (Item);
       end if;
 
-      return    Nam = Name_Contract_Cases
+      return    Nam = Name_Always_Terminates
+        or else Nam = Name_Contract_Cases
         or else Nam = Name_Depends
         or else Nam = Name_Exceptional_Cases
         or else Nam = Name_Extensions_Visible
@@ -29207,6 +29231,13 @@ package body Sem_Util is
             return Typ;
          end if;
 
+      elsif From_Limited_With (Typ) then
+         if Has_Non_Limited_View (Typ) then
+            return Validated_View (Non_Limited_View (Typ));
+         else
+            return Typ;
+         end if;
+
       else
          return Typ;
       end if;
@@ -29367,7 +29398,11 @@ package body Sem_Util is
    -- Wrong_Type --
    ----------------
 
-   procedure Wrong_Type (Expr : Node_Id; Expected_Type : Entity_Id) is
+   procedure Wrong_Type
+     (Expr          : Node_Id;
+      Expected_Type : Entity_Id;
+      Multiple      : Boolean := False)
+   is
       Found_Type : constant Entity_Id := First_Subtype (Etype (Expr));
       Expec_Type : constant Entity_Id := First_Subtype (Expected_Type);
 
@@ -29454,13 +29489,14 @@ package body Sem_Util is
 
    begin
       --  Don't output message if either type is Any_Type, or if a message
-      --  has already been posted for this node. We need to do the latter
-      --  check explicitly (it is ordinarily done in Errout), because we
-      --  are using ! to force the output of the error messages.
+      --  has already been posted for this node and we do not want multiple
+      --  error messages. We need to do the latter check explicitly (it is
+      --  ordinarily done in Errout) because we are using '!' to force the
+      --  output of the error messages.
 
       if Expec_Type = Any_Type
         or else Found_Type = Any_Type
-        or else Error_Posted (Expr)
+        or else (Error_Posted (Expr) and then not Multiple)
       then
          return;
 
@@ -29479,56 +29515,6 @@ package body Sem_Util is
         and then Full_View (Etype (Expr)) = Expec_Type
       then
          return;
-
-      --  In an instance, there is an ongoing problem with completion of
-      --  types derived from private types. Their structure is what Gigi
-      --  expects, but the Etype is the parent type rather than the derived
-      --  private type itself. Do not flag error in this case. The private
-      --  completion is an entity without a parent, like an Itype. Similarly,
-      --  full and partial views may be incorrect in the instance.
-      --  There is no simple way to insure that it is consistent ???
-
-      --  A similar view discrepancy can happen in an inlined body, for the
-      --  same reason: inserted body may be outside of the original package
-      --  and only partial views are visible at the point of insertion.
-
-      --  If In_Generic_Actual (Expr) is True then we cannot assume that
-      --  the successful semantic analysis of the generic guarantees anything
-      --  useful about type checking of this instance, so we ignore
-      --  In_Instance in that case. There may be cases where this is not
-      --  right (the symptom would probably be rejecting something
-      --  that ought to be accepted) but we don't currently have any
-      --  concrete examples of this.
-
-      elsif (In_Instance and then not In_Generic_Actual (Expr))
-        or else In_Inlined_Body
-      then
-         if Etype (Etype (Expr)) = Etype (Expected_Type)
-           and then
-             (Has_Private_Declaration (Expected_Type)
-               or else Has_Private_Declaration (Etype (Expr)))
-           and then No (Parent (Expected_Type))
-         then
-            return;
-
-         elsif Nkind (Parent (Expr)) = N_Qualified_Expression
-           and then Entity (Subtype_Mark (Parent (Expr))) = Expected_Type
-         then
-            return;
-
-         elsif Is_Private_Type (Expected_Type)
-           and then Present (Full_View (Expected_Type))
-           and then Covers (Full_View (Expected_Type), Etype (Expr))
-         then
-            return;
-
-         --  Conversely, type of expression may be the private one
-
-         elsif Is_Private_Type (Base_Type (Etype (Expr)))
-           and then Full_View (Base_Type (Etype (Expr))) = Expected_Type
-         then
-            return;
-         end if;
       end if;
 
       --  Avoid printing internally generated subtypes in error messages and
@@ -30785,7 +30771,8 @@ package body Sem_Util is
                   --    array_component_association or of
                   --    a container_element_associatiation.
 
-                  if Nkind (Par) = N_Component_Association
+                  if Nkind (Par) in N_Component_Association
+                                  | N_Iterated_Component_Association
                     and then Trailer = Expression (Par)
                   then
                      --  determine whether Par is part of an array aggregate

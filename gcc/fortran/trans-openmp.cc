@@ -3099,6 +3099,30 @@ gfc_trans_omp_clauses (stmtblock_t *block, gfc_omp_clauses *clauses,
 		  always_modifier = true;
 		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_ALWAYS_TOFROM);
 		  break;
+		case OMP_MAP_PRESENT_ALLOC:
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_PRESENT_ALLOC);
+		  break;
+		case OMP_MAP_PRESENT_TO:
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_PRESENT_TO);
+		  break;
+		case OMP_MAP_PRESENT_FROM:
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_PRESENT_FROM);
+		  break;
+		case OMP_MAP_PRESENT_TOFROM:
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_PRESENT_TOFROM);
+		  break;
+		case OMP_MAP_ALWAYS_PRESENT_TO:
+		  always_modifier = true;
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_ALWAYS_PRESENT_TO);
+		  break;
+		case OMP_MAP_ALWAYS_PRESENT_FROM:
+		  always_modifier = true;
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_ALWAYS_PRESENT_FROM);
+		  break;
+		case OMP_MAP_ALWAYS_PRESENT_TOFROM:
+		  always_modifier = true;
+		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_ALWAYS_PRESENT_TOFROM);
+		  break;
 		case OMP_MAP_RELEASE:
 		  OMP_CLAUSE_SET_MAP_KIND (node, GOMP_MAP_RELEASE);
 		  break;
@@ -3894,8 +3918,19 @@ gfc_trans_omp_clauses (stmtblock_t *block, gfc_omp_clauses *clauses,
 		  gcc_assert (POINTER_TYPE_P (TREE_TYPE (ptr)));
 		  OMP_CLAUSE_DECL (node) = build_fold_indirect_ref (ptr);
 		}
+	      if (n->u.present_modifier)
+		OMP_CLAUSE_MOTION_PRESENT (node) = 1;
 	      omp_clauses = gfc_trans_add_clause (node, omp_clauses);
 	    }
+	  break;
+	case OMP_LIST_USES_ALLOCATORS:
+	  /* Ignore pre-defined allocators as no special treatment is needed. */
+	  for (; n != NULL; n = n->next)
+	    if (n->sym->attr.flavor == FL_VARIABLE)
+	      break;
+	  if (n != NULL)
+	    sorry_at (input_location, "%<uses_allocators%> clause with traits "
+				      "and memory spaces");
 	  break;
 	default:
 	  break;
@@ -4408,6 +4443,9 @@ gfc_trans_omp_clauses (stmtblock_t *block, gfc_omp_clauses *clauses,
 	case OMP_DEFAULTMAP_CAT_UNCATEGORIZED:
 	  category = OMP_CLAUSE_DEFAULTMAP_CATEGORY_UNSPECIFIED;
 	  break;
+	case OMP_DEFAULTMAP_CAT_ALL:
+	  category = OMP_CLAUSE_DEFAULTMAP_CATEGORY_ALL;
+	  break;
 	case OMP_DEFAULTMAP_CAT_SCALAR:
 	  category = OMP_CLAUSE_DEFAULTMAP_CATEGORY_SCALAR;
 	  break;
@@ -4434,6 +4472,9 @@ gfc_trans_omp_clauses (stmtblock_t *block, gfc_omp_clauses *clauses,
 	  break;
 	case OMP_DEFAULTMAP_FIRSTPRIVATE:
 	  behavior = OMP_CLAUSE_DEFAULTMAP_FIRSTPRIVATE;
+	  break;
+	case OMP_DEFAULTMAP_PRESENT:
+	  behavior = OMP_CLAUSE_DEFAULTMAP_PRESENT;
 	  break;
 	case OMP_DEFAULTMAP_NONE: behavior = OMP_CLAUSE_DEFAULTMAP_NONE; break;
 	case OMP_DEFAULTMAP_DEFAULT:
@@ -5336,10 +5377,10 @@ gfc_nonrect_loop_expr (stmtblock_t *pblock, gfc_se *sep, int loop_n,
 
   if (!simple)
     {
-      /* FIXME: Handle non-unit iter steps, cf. PR fortran/107424.  */
+      /* FIXME: Handle non-const iter steps, cf. PR fortran/110735.  */
       sorry_at (gfc_get_location (&curr_loop_var->where),
-		"non-rectangular loop nest with step other than constant 1 "
-		"or -1 for %qs", curr_loop_var->symtree->n.sym->name);
+		"non-rectangular loop nest with non-constant step for %qs",
+		curr_loop_var->symtree->n.sym->name);
       return false;
     }
 
@@ -5356,10 +5397,10 @@ gfc_nonrect_loop_expr (stmtblock_t *pblock, gfc_se *sep, int loop_n,
 	  }
 	else
 	  {
-	    /* FIXME: Handle non-unit iter steps, cf. PR fortran/107424.  */
+	    /* FIXME: Handle non-const iter steps, cf. PR fortran/110735.  */
 	    sorry_at (gfc_get_location (&code->loc),
-		      "non-rectangular loop nest with step other than constant "
-		      "1 or -1 for %qs", var->name);
+		      "non-rectangular loop nest with non-constant step "
+		      "for %qs", var->name);
 	    inform (gfc_get_location (&expr->where), "Used here");
 	    return false;
 	  }
@@ -5540,10 +5581,8 @@ gfc_trans_omp_do (gfc_code *code, gfc_exec_op op, stmtblock_t *pblock,
       gfc_add_block_to_block (pblock, &se.pre);
       step = gfc_evaluate_now (se.expr, pblock);
 
-      if (integer_onep (step))
-	simple = 1;
-      else if (tree_int_cst_equal (step, integer_minus_one_node))
-	simple = -1;
+      if (TREE_CODE (step) == INTEGER_CST)
+	simple = tree_int_cst_sgn (step);
 
       gfc_init_se (&se, NULL);
       if (!clauses->non_rectangular
@@ -6552,6 +6591,8 @@ gfc_split_omp_clauses (gfc_code *code,
 	    = code->ext.omp_clauses->device;
 	  clausesa[GFC_OMP_SPLIT_TARGET].thread_limit
 	    = code->ext.omp_clauses->thread_limit;
+	  clausesa[GFC_OMP_SPLIT_TARGET].lists[OMP_LIST_USES_ALLOCATORS]
+	    = code->ext.omp_clauses->lists[OMP_LIST_USES_ALLOCATORS];
 	  for (int i = 0; i < OMP_DEFAULTMAP_CAT_NUM; i++)
 	    clausesa[GFC_OMP_SPLIT_TARGET].defaultmap[i]
 	      = code->ext.omp_clauses->defaultmap[i];

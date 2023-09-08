@@ -37,6 +37,13 @@ gfc_st_label *gfc_statement_label;
 static locus label_locus;
 static jmp_buf eof_buf;
 
+/* Respectively pointer and content of the current interface body being parsed
+   as they were at the beginning of decode_statement.  Used to restore the
+   interface to its previous state in case a parsed statement is rejected after
+   some symbols have been added to the interface.  */
+static gfc_interface **current_interface_ptr = nullptr;
+static gfc_interface *previous_interface_head = nullptr;
+
 gfc_state_data *gfc_state_stack;
 static bool last_was_use_stmt = false;
 bool in_exec_part;
@@ -291,6 +298,46 @@ end_of_block:
   return ST_GET_FCN_CHARACTERISTICS;
 }
 
+
+/* Tells whether gfc_get_current_interface_head can be used safely.  */
+
+static bool
+current_interface_valid_p ()
+{
+  switch (current_interface.type)
+    {
+    case INTERFACE_INTRINSIC_OP:
+      return current_interface.ns != nullptr;
+
+    case INTERFACE_GENERIC:
+    case INTERFACE_DTIO:
+      return current_interface.sym != nullptr;
+
+    case INTERFACE_USER_OP:
+      return current_interface.uop != nullptr;
+
+    default:
+      return false;
+    }
+}
+
+
+/* Return a pointer to the interface currently being parsed, or nullptr if
+   we are not currently parsing an interface body.  */
+
+static gfc_interface **
+get_current_interface_ptr ()
+{
+  if (current_interface_valid_p ())
+    {
+      gfc_interface *& ifc_ptr = gfc_current_interface_head ();
+      return &ifc_ptr;
+    }
+  else
+    return nullptr;
+}
+
+
 static bool in_specification_block;
 
 /* This is the primary 'decode_statement'.  */
@@ -306,6 +353,11 @@ decode_statement (void)
 
   gfc_clear_error ();	/* Clear any pending errors.  */
   gfc_clear_warning ();	/* Clear any pending warnings.  */
+
+  current_interface_ptr = get_current_interface_ptr ();
+  previous_interface_head = current_interface_ptr == nullptr
+			    ? nullptr
+			    : *current_interface_ptr;
 
   gfc_matching_function = false;
 
@@ -934,7 +986,16 @@ decode_omp_directive (void)
      first (those also shall not turn off implicit pure).  */
   switch (c)
     {
+    case 'a':
+      /* For -fopenmp-simd, ignore 'assumes'; note no clause starts with 's'. */
+      if (!flag_openmp && gfc_match ("assumes") == MATCH_YES)
+	break;
+      matcho ("assumes", gfc_match_omp_assumes, ST_OMP_ASSUMES);
+      matchs ("assume", gfc_match_omp_assume, ST_OMP_ASSUME);
+      break;
     case 'd':
+      matchds ("declare reduction", gfc_match_omp_declare_reduction,
+	       ST_OMP_DECLARE_REDUCTION);
       matchds ("declare simd", gfc_match_omp_declare_simd,
 	       ST_OMP_DECLARE_SIMD);
       matchdo ("declare target", gfc_match_omp_declare_target,
@@ -942,16 +1003,25 @@ decode_omp_directive (void)
       matchdo ("declare variant", gfc_match_omp_declare_variant,
 	       ST_OMP_DECLARE_VARIANT);
       break;
+    case 'e':
+      matchs ("end assume", gfc_match_omp_eos_error, ST_OMP_END_ASSUME);
+      matchs ("end simd", gfc_match_omp_eos_error, ST_OMP_END_SIMD);
+      matcho ("error", gfc_match_omp_error, ST_OMP_ERROR);
+      break;
     case 's':
+      matchs ("scan", gfc_match_omp_scan, ST_OMP_SCAN);
       matchs ("simd", gfc_match_omp_simd, ST_OMP_SIMD);
+      break;
+    case 'n':
+      matcho ("nothing", gfc_match_omp_nothing, ST_NONE);
       break;
     }
 
   pure_ok = false;
   if (flag_openmp && gfc_pure (NULL))
     {
-      gfc_error_now ("OpenMP directives other than SIMD or DECLARE TARGET "
-		     "at %C may not appear in PURE procedures");
+      gfc_error_now ("OpenMP directive at %C is not pure and thus may not "
+		     "appear in a PURE procedure");
       gfc_error_recovery ();
       return ST_NONE;
     }
@@ -967,11 +1037,6 @@ decode_omp_directive (void)
       else
 	matcho ("allocate", gfc_match_omp_allocate, ST_OMP_ALLOCATE);
       matcho ("allocators", gfc_match_omp_allocators, ST_OMP_ALLOCATORS);
-      /* For -fopenmp-simd, ignore 'assumes'; note no clause starts with 's'. */
-      if (!flag_openmp && gfc_match ("assumes") == MATCH_YES)
-	break;
-      matcho ("assumes", gfc_match_omp_assumes, ST_OMP_ASSUMES);
-      matchs ("assume", gfc_match_omp_assume, ST_OMP_ASSUME);
       matcho ("atomic", gfc_match_omp_atomic, ST_OMP_ATOMIC);
       break;
     case 'b':
@@ -984,8 +1049,6 @@ decode_omp_directive (void)
       matcho ("critical", gfc_match_omp_critical, ST_OMP_CRITICAL);
       break;
     case 'd':
-      matchds ("declare reduction", gfc_match_omp_declare_reduction,
-	       ST_OMP_DECLARE_REDUCTION);
       matcho ("depobj", gfc_match_omp_depobj, ST_OMP_DEPOBJ);
       matchs ("distribute parallel do simd",
 	      gfc_match_omp_distribute_parallel_do_simd,
@@ -999,9 +1062,7 @@ decode_omp_directive (void)
       matcho ("do", gfc_match_omp_do, ST_OMP_DO);
       break;
     case 'e':
-      matcho ("error", gfc_match_omp_error, ST_OMP_ERROR);
       matcho ("end allocators", gfc_match_omp_eos_error, ST_OMP_END_ALLOCATORS);
-      matchs ("end assume", gfc_match_omp_eos_error, ST_OMP_END_ASSUME);
       matcho ("end atomic", gfc_match_omp_eos_error, ST_OMP_END_ATOMIC);
       matcho ("end critical", gfc_match_omp_end_critical, ST_OMP_END_CRITICAL);
       matchs ("end distribute parallel do simd", gfc_match_omp_eos_error,
@@ -1014,7 +1075,6 @@ decode_omp_directive (void)
       matchs ("end do simd", gfc_match_omp_end_nowait, ST_OMP_END_DO_SIMD);
       matcho ("end do", gfc_match_omp_end_nowait, ST_OMP_END_DO);
       matchs ("end loop", gfc_match_omp_eos_error, ST_OMP_END_LOOP);
-      matchs ("end simd", gfc_match_omp_eos_error, ST_OMP_END_SIMD);
       matcho ("end masked taskloop simd", gfc_match_omp_eos_error,
 	      ST_OMP_END_MASKED_TASKLOOP_SIMD);
       matcho ("end masked taskloop", gfc_match_omp_eos_error,
@@ -1160,7 +1220,6 @@ decode_omp_directive (void)
       matcho ("requires", gfc_match_omp_requires, ST_OMP_REQUIRES);
       break;
     case 's':
-      matchs ("scan", gfc_match_omp_scan, ST_OMP_SCAN);
       matcho ("scope", gfc_match_omp_scope, ST_OMP_SCOPE);
       matcho ("sections", gfc_match_omp_sections, ST_OMP_SECTIONS);
       matcho ("section", gfc_match_omp_eos_error, ST_OMP_SECTION);
@@ -1244,14 +1303,27 @@ decode_omp_directive (void)
   return ST_NONE;
 
  finish:
+  if (ret == ST_OMP_ERROR && new_st.ext.omp_clauses->at == OMP_AT_EXECUTION)
+    {
+      gfc_unset_implicit_pure (NULL);
+
+      if (gfc_pure (NULL))
+	{
+	  gfc_error_now ("OpenMP ERROR directive at %L with %<at(execution)%> "
+			 "clause in a PURE procedure", &old_locus);
+	  reject_statement ();
+	  gfc_error_recovery ();
+	  return ST_NONE;
+	}
+    }
   if (!pure_ok)
     {
       gfc_unset_implicit_pure (NULL);
 
       if (!flag_openmp && gfc_pure (NULL))
 	{
-	  gfc_error_now ("OpenMP directives other than SIMD or DECLARE TARGET "
-			 "at %C may not appear in PURE procedures");
+	  gfc_error_now ("OpenMP directive at %C is not pure and thus may not "
+			 "appear in a PURE procedure");
 	  reject_statement ();
 	  gfc_error_recovery ();
 	  return ST_NONE;
@@ -1292,6 +1364,34 @@ decode_omp_directive (void)
 	  prog_unit->omp_target_seen = true;
 	break;
       }
+    case ST_OMP_TEAMS:
+    case ST_OMP_TEAMS_DISTRIBUTE:
+    case ST_OMP_TEAMS_DISTRIBUTE_SIMD:
+    case ST_OMP_TEAMS_DISTRIBUTE_PARALLEL_DO:
+    case ST_OMP_TEAMS_DISTRIBUTE_PARALLEL_DO_SIMD:
+    case ST_OMP_TEAMS_LOOP:
+      for (gfc_state_data *stk = gfc_state_stack->previous; stk;
+	   stk = stk->previous)
+	if (stk && stk->tail)
+	  switch (stk->tail->op)
+	    {
+	    case EXEC_OMP_TARGET:
+	    case EXEC_OMP_TARGET_TEAMS_DISTRIBUTE:
+	    case EXEC_OMP_TARGET_TEAMS_DISTRIBUTE_SIMD:
+	    case EXEC_OMP_TARGET_TEAMS_DISTRIBUTE_PARALLEL_DO:
+	    case EXEC_OMP_TARGET_TEAMS_DISTRIBUTE_PARALLEL_DO_SIMD:
+	    case EXEC_OMP_TARGET_TEAMS_LOOP:
+	    case EXEC_OMP_TARGET_PARALLEL:
+	    case EXEC_OMP_TARGET_PARALLEL_DO:
+	    case EXEC_OMP_TARGET_PARALLEL_DO_SIMD:
+	    case EXEC_OMP_TARGET_PARALLEL_LOOP:
+	    case EXEC_OMP_TARGET_SIMD:
+	      stk->tail->ext.omp_clauses->contains_teams_construct = 1;
+	      break;
+	    default:
+	      break;
+	    }
+      break;
     case ST_OMP_ERROR:
       if (new_st.ext.omp_clauses->at != OMP_AT_EXECUTION)
 	return ST_NONE;
@@ -2994,6 +3094,8 @@ reject_statement (void)
 {
   gfc_free_equiv_until (gfc_current_ns->equiv, gfc_current_ns->old_equiv);
   gfc_current_ns->equiv = gfc_current_ns->old_equiv;
+  gfc_drop_interface_elements_before (current_interface_ptr,
+				      previous_interface_head);
 
   gfc_reject_data (gfc_current_ns);
 
@@ -5017,6 +5119,7 @@ parse_associate (void)
   gfc_state_data s;
   gfc_statement st;
   gfc_association_list* a;
+  gfc_array_spec *as;
 
   gfc_notify_std (GFC_STD_F2003, "ASSOCIATE construct at %C");
 
@@ -5032,8 +5135,7 @@ parse_associate (void)
   for (a = new_st.ext.block.assoc; a; a = a->next)
     {
       gfc_symbol* sym;
-      gfc_ref *ref;
-      gfc_array_ref *array_ref;
+      gfc_expr *target;
 
       if (gfc_get_sym_tree (a->name, NULL, &a->st, false))
 	gcc_unreachable ();
@@ -5050,6 +5152,7 @@ parse_associate (void)
 	 for parsing component references on the associate-name
 	 in case of association to a derived-type.  */
       sym->ts = a->target->ts;
+      target = a->target;
 
       /* Don’t share the character length information between associate
 	 variable and target if the length is not a compile-time constant,
@@ -5069,31 +5172,37 @@ parse_associate (void)
 	       && sym->ts.u.cl->length->expr_type == EXPR_CONSTANT))
 	sym->ts.u.cl = gfc_new_charlen (gfc_current_ns, NULL);
 
-      /* Check if the target expression is array valued.  This cannot always
-	 be done by looking at target.rank, because that might not have been
-	 set yet.  Therefore traverse the chain of refs, looking for the last
-	 array ref and evaluate that.  */
-      array_ref = NULL;
-      for (ref = a->target->ref; ref; ref = ref->next)
-	if (ref->type == REF_ARRAY)
-	  array_ref = &ref->u.ar;
-      if (array_ref || a->target->rank)
+      /* Check if the target expression is array valued. This cannot be done
+	 by calling gfc_resolve_expr because the context is unavailable.
+	 However, the references can be resolved and the rank of the target
+	 expression set.  */
+      if (target->ref && gfc_resolve_ref (target)
+	  && target->expr_type != EXPR_ARRAY
+	  && target->expr_type != EXPR_COMPCALL)
+	gfc_expression_rank (target);
+
+      /* Determine whether or not function expressions with unknown type are
+	 structure constructors. If so, the function result can be converted
+	 to be a derived type.
+	 TODO: Deal with references to sibling functions that have not yet been
+	 parsed (PRs 89645 and 99065).  */
+      if (target->expr_type == EXPR_FUNCTION && target->ts.type == BT_UNKNOWN)
 	{
-	  gfc_array_spec *as;
-	  int dim, rank = 0;
-	  if (array_ref)
+	  gfc_symbol *derived;
+	  /* The derived type has a leading uppercase character.  */
+	  gfc_find_symbol (gfc_dt_upper_string (target->symtree->name),
+			   my_ns->parent, 1, &derived);
+	  if (derived && derived->attr.flavor == FL_DERIVED)
 	    {
-	      a->rankguessed = 1;
-	      /* Count the dimension, that have a non-scalar extend.  */
-	      for (dim = 0; dim < array_ref->dimen; ++dim)
-		if (array_ref->dimen_type[dim] != DIMEN_ELEMENT
-		    && !(array_ref->dimen_type[dim] == DIMEN_UNKNOWN
-			 && array_ref->end[dim] == NULL
-			 && array_ref->start[dim] != NULL))
-		  ++rank;
+	      sym->ts.type = BT_DERIVED;
+	      sym->ts.u.derived = derived;
 	    }
-	  else
-	    rank = a->target->rank;
+	}
+
+      if (target->rank)
+	{
+	  int rank = 0;
+	  rank = target->rank;
 	  /* When the rank is greater than zero then sym will be an array.  */
 	  if (sym->ts.type == BT_CLASS && CLASS_DATA (sym))
 	    {
@@ -5104,8 +5213,8 @@ parse_associate (void)
 		  /* Don't just (re-)set the attr and as in the sym.ts,
 		     because this modifies the target's attr and as.  Copy the
 		     data and do a build_class_symbol.  */
-		  symbol_attribute attr = CLASS_DATA (a->target)->attr;
-		  int corank = gfc_get_corank (a->target);
+		  symbol_attribute attr = CLASS_DATA (target)->attr;
+		  int corank = gfc_get_corank (target);
 		  gfc_typespec type;
 
 		  if (rank || corank)
@@ -5140,7 +5249,7 @@ parse_associate (void)
 	      as = gfc_get_array_spec ();
 	      as->type = AS_DEFERRED;
 	      as->rank = rank;
-	      as->corank = gfc_get_corank (a->target);
+	      as->corank = gfc_get_corank (target);
 	      sym->as = as;
 	      sym->attr.dimension = 1;
 	      if (as->corank)
@@ -5706,7 +5815,7 @@ parse_openmp_allocate_block (gfc_statement omp_st)
 static gfc_statement
 parse_omp_structured_block (gfc_statement omp_st, bool workshare_stmts_only)
 {
-  gfc_statement st, omp_end_st;
+  gfc_statement st, omp_end_st, first_st;
   gfc_code *cp, *np;
   gfc_state_data s;
 
@@ -5797,7 +5906,7 @@ parse_omp_structured_block (gfc_statement omp_st, bool workshare_stmts_only)
   gfc_namespace *my_ns = NULL;
   gfc_namespace *my_parent = NULL;
 
-  st = next_statement ();
+  first_st = st = next_statement ();
 
   if (st == ST_BLOCK)
     {
@@ -5816,8 +5925,27 @@ parse_omp_structured_block (gfc_statement omp_st, bool workshare_stmts_only)
       new_st.ext.block.ns = my_ns;
       new_st.ext.block.assoc = NULL;
       accept_statement (ST_BLOCK);
-      st = parse_spec (ST_NONE);
+      first_st = next_statement ();
+      st = parse_spec (first_st);
     }
+
+  if (omp_end_st == ST_OMP_END_TARGET)
+    switch (first_st)
+      {
+      case ST_OMP_TEAMS:
+      case ST_OMP_TEAMS_DISTRIBUTE:
+      case ST_OMP_TEAMS_DISTRIBUTE_SIMD:
+      case ST_OMP_TEAMS_DISTRIBUTE_PARALLEL_DO:
+      case ST_OMP_TEAMS_DISTRIBUTE_PARALLEL_DO_SIMD:
+      case ST_OMP_TEAMS_LOOP:
+	{
+	  gfc_state_data *stk = gfc_state_stack->previous;
+	  stk->tail->ext.omp_clauses->target_first_st_is_teams = true;
+	  break;
+	}
+      default:
+	break;
+      }
 
   do
     {
