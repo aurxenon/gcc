@@ -23,13 +23,21 @@ along with GCC; see the file COPYING3.  If not see
 
 #include "jit-common.h"
 #include "jit-logging.h"
+#include "libgccjit.h"
+
+#include <string>
+#include <vector>
+
+#include <string>
+#include <unordered_map>
 
 class timer;
+
+extern std::unordered_map<std::string, gcc::jit::recording::function_type*> target_function_types;
 
 namespace gcc {
 
 namespace jit {
-
 extern const char * const unary_op_reproducer_strings[];
 extern const char * const binary_op_reproducer_strings[];
 
@@ -91,7 +99,7 @@ public:
   type *
   new_array_type (location *loc,
 		  type *element_type,
-		  int num_elements);
+		  unsigned long num_elements);
 
   field *
   new_field (location *loc,
@@ -116,7 +124,8 @@ public:
   new_function_type (type *return_type,
 		     int num_params,
 		     type **param_types,
-		     int is_variadic);
+		     int is_variadic,
+		     int is_target_builtin);
 
   type *
   new_function_ptr_type (location *loc,
@@ -142,6 +151,9 @@ public:
 
   function *
   get_builtin_function (const char *name);
+
+  function *
+  get_target_builtin_function (const char *name);
 
   lvalue *
   new_global (location *loc,
@@ -172,6 +184,12 @@ public:
   new_rvalue_from_vector (location *loc,
 			  vector_type *type,
 			  rvalue **elements);
+
+  rvalue *
+  new_rvalue_vector_perm (location *loc,
+			  rvalue *elements1,
+			  rvalue *elements2,
+			  rvalue *mask);
 
   rvalue *
   new_unary_op (location *loc,
@@ -214,6 +232,16 @@ public:
   new_array_access (location *loc,
 		    rvalue *ptr,
 		    rvalue *index);
+
+  rvalue *
+  new_convert_vector (location *loc,
+		  rvalue *vector,
+		  type *type);
+
+  lvalue *
+  new_vector_access (location *loc,
+		     rvalue *vector,
+		     rvalue *index);
 
   case_ *
   new_case (rvalue *min_value,
@@ -282,6 +310,9 @@ public:
   void
   compile_to_file (enum gcc_jit_output_kind output_kind,
 		   const char *output_path);
+
+  void
+  get_target_info ();
 
   void
   add_error (location *loc, const char *fmt, ...)
@@ -528,6 +559,8 @@ public:
   type *get_aligned (size_t alignment_in_bytes);
   type *get_vector (size_t num_units);
 
+  void set_packed ();
+
   /* Get the type obtained when dereferencing this type.
 
      This will return NULL if it's not valid to dereference this type.
@@ -539,6 +572,8 @@ public:
      memento_of_get_pointer as it is used for initializing globals of
      these types.  */
   virtual size_t get_size () { gcc_unreachable (); }
+
+  virtual type* copy(context* ctxt) = 0;
 
   /* Dynamic casts.  */
   virtual function_type *dyn_cast_function_type () { return NULL; }
@@ -595,8 +630,12 @@ public:
 protected:
   type (context *ctxt)
     : memento (ctxt),
+    m_packed (false),
     m_pointer_to_this_type (NULL)
   {}
+
+public:
+  bool m_packed;
 
 private:
   type *m_pointer_to_this_type;
@@ -614,6 +653,11 @@ public:
   type *dereference () final override;
 
   size_t get_size () final override;
+
+  type* copy(context* ctxt) final override
+  {
+    return ctxt->get_type (m_kind);
+  }
 
   bool accepts_writes_from (type *rtype) final override
   {
@@ -666,6 +710,13 @@ public:
 
   type *dereference () final override { return m_other_type; }
 
+  type* copy(context* ctxt) final override
+  {
+    type* result = new memento_of_get_pointer (m_other_type->copy (ctxt));
+    ctxt->record (result);
+    return result;
+  }
+
   size_t get_size () final override;
 
   bool accepts_writes_from (type *rtype) final override;
@@ -701,6 +752,7 @@ public:
 
   size_t get_size () final override { return m_other_type->get_size (); };
 
+  // FIXME: this is wrong. A vector is not an int.
   bool is_int () const final override { return m_other_type->is_int (); }
   bool is_float () const final override { return m_other_type->is_float (); }
   bool is_bool () const final override { return m_other_type->is_bool (); }
@@ -720,10 +772,11 @@ public:
   memento_of_get_const (type *other_type)
   : decorated_type (other_type) {}
 
-  bool accepts_writes_from (type */*rtype*/) final override
+  type* copy(context* ctxt) final override
   {
-    /* Can't write to a "const".  */
-    return false;
+    type* result = new memento_of_get_const (m_other_type->copy (ctxt));
+    ctxt->record (result);
+    return result;
   }
 
   /* Strip off the "const", giving the underlying type.  */
@@ -759,6 +812,13 @@ public:
     return m_other_type->is_same_type_as (other->is_volatile ());
   }
 
+  type* copy (context* ctxt) final override
+  {
+    type* result = new memento_of_get_volatile (m_other_type->copy (ctxt));
+    ctxt->record (result);
+    return result;
+  }
+
   /* Strip off the "volatile", giving the underlying type.  */
   type *unqualified () final override { return m_other_type; }
 
@@ -785,6 +845,13 @@ public:
     return m_other_type->is_same_type_as (other->is_restrict ());
   }
 
+  type* copy (context* ctxt) final override
+  {
+    type* result = new memento_of_get_restrict (m_other_type->copy (ctxt));
+    ctxt->record (result);
+    return result;
+  }
+
   /* Strip off the "restrict", giving the underlying type.  */
   type *unqualified () final override { return m_other_type; }
 
@@ -805,10 +872,19 @@ public:
   : decorated_type (other_type),
     m_alignment_in_bytes (alignment_in_bytes) {}
 
+  type* copy(context* ctxt) final override
+  {
+    type* result = new memento_of_get_aligned (m_other_type->copy (ctxt), m_alignment_in_bytes);
+    ctxt->record (result);
+    return result;
+  }
+
   /* Strip off the alignment, giving the underlying type.  */
   type *unqualified () final override { return m_other_type; }
 
   void replay_into (replayer *) final override;
+
+  vector_type *dyn_cast_vector_type () final override { return m_other_type->dyn_cast_vector_type (); }
 
 private:
   string * make_debug_string () final override;
@@ -825,6 +901,13 @@ public:
   vector_type (type *other_type, size_t num_units)
   : decorated_type (other_type),
     m_num_units (num_units) {}
+
+  type* copy(context* ctxt) final override
+  {
+    type* result = new vector_type(m_other_type->copy (ctxt), m_num_units);
+    ctxt->record (result);
+    return result;
+  }
 
   size_t get_num_units () const { return m_num_units; }
 
@@ -859,7 +942,7 @@ class array_type : public type
   array_type (context *ctxt,
 	      location *loc,
 	      type *element_type,
-	      int num_elements)
+	      unsigned long num_elements)
   : type (ctxt),
     m_loc (loc),
     m_element_type (element_type),
@@ -868,12 +951,19 @@ class array_type : public type
 
   type *dereference () final override;
 
+  type* copy(context* ctxt) final override
+  {
+    type* result = new array_type (ctxt, m_loc, m_element_type->copy (ctxt), m_num_elements);
+    ctxt->record (result);
+    return result;
+  }
+
   bool is_int () const final override { return false; }
   bool is_float () const final override { return false; }
   bool is_bool () const final override { return false; }
   type *is_pointer () final override { return NULL; }
   type *is_array () final override { return m_element_type; }
-  int num_elements () { return m_num_elements; }
+  unsigned long num_elements () { return m_num_elements; }
   bool is_signed () const final override { return false; }
 
   void replay_into (replayer *) final override;
@@ -885,7 +975,7 @@ class array_type : public type
  private:
   location *m_loc;
   type *m_element_type;
-  int m_num_elements;
+  unsigned long m_num_elements;
 };
 
 class function_type : public type
@@ -895,13 +985,26 @@ public:
 		 type *return_type,
 		 int num_params,
 		 type **param_types,
-		 int is_variadic);
+		 int is_variadic,
+		 int is_target_builtin);
 
   type *dereference () final override;
   function_type *dyn_cast_function_type () final override { return this; }
   function_type *as_a_function_type () final override { return this; }
 
   bool is_same_type_as (type *other) final override;
+
+  type* copy(context* ctxt) final override
+  {
+    auto_vec<type *> new_params{};
+    for (size_t i = 0; i < m_param_types.length (); i++)
+      new_params.safe_push (m_param_types[i]->copy (ctxt));
+
+    type* result = new function_type (ctxt, m_return_type->copy (ctxt), m_param_types.length (), new_params.address (),
+      m_is_variadic, m_is_target_builtin);
+    ctxt->record (result);
+    return result;
+  }
 
   bool is_int () const final override { return false; }
   bool is_float () const final override { return false; }
@@ -915,6 +1018,7 @@ public:
   type * get_return_type () const { return m_return_type; }
   const vec<type *> &get_param_types () const { return m_param_types; }
   int is_variadic () const { return m_is_variadic; }
+  int is_target_builtin () const { return m_is_target_builtin; }
 
   string * make_debug_string_with_ptr ();
 
@@ -931,6 +1035,7 @@ private:
   type *m_return_type;
   auto_vec<type *> m_param_types;
   int m_is_variadic;
+  int m_is_target_builtin;
 };
 
 class field : public memento
@@ -1032,9 +1137,11 @@ public:
     return static_cast <playback::compound_type *> (m_playback_obj);
   }
 
-private:
+protected:
   location *m_loc;
   string *m_name;
+
+private:
   fields *m_fields;
 };
 
@@ -1046,6 +1153,13 @@ public:
 	   string *name);
 
   struct_ *dyn_cast_struct () final override { return this; }
+
+  type* copy(context* ctxt) final override
+  {
+    type* result = new struct_ (ctxt, m_loc, m_name);
+    ctxt->record (result);
+    return result;
+  }
 
   type *
   as_type () { return this; }
@@ -1093,6 +1207,13 @@ public:
 	  string *name);
 
   void replay_into (replayer *r) final override;
+
+  type* copy(context* ctxt) final override
+  {
+    type* result = new union_ (ctxt, m_loc, m_name);
+    ctxt->record (result);
+    return result;
+  }
 
   bool is_union () const final override { return true; }
 
@@ -1216,7 +1337,8 @@ public:
     m_link_section (NULL),
     m_reg_name (NULL),
     m_tls_model (GCC_JIT_TLS_MODEL_NONE),
-    m_alignment (0)
+    m_alignment (0),
+    m_attributes ()
   {}
 
   playback::lvalue *
@@ -1236,6 +1358,14 @@ public:
   as_rvalue () { return this; }
 
   const char *access_as_rvalue (reproducer &r) override;
+
+  void set_readonly ()
+  {
+    m_readonly = true;
+  }
+
+  void add_attribute (gcc_jit_variable_attribute attribute, const char* value);
+
   virtual const char *access_as_lvalue (reproducer &r);
   virtual bool is_global () const { return false; }
   void set_tls_model (enum gcc_jit_tls_model model);
@@ -1249,6 +1379,8 @@ protected:
   string *m_reg_name;
   enum gcc_jit_tls_model m_tls_model;
   unsigned m_alignment;
+  bool m_readonly = false;
+  std::vector<std::pair<gcc_jit_variable_attribute, std::string>> m_attributes;
 };
 
 class param : public lvalue
@@ -1302,7 +1434,8 @@ public:
 	    int num_params,
 	    param **params,
 	    int is_variadic,
-	    enum built_in_function builtin_id);
+	    enum built_in_function builtin_id,
+	    int is_target_builtin);
 
   void replay_into (replayer *r) final override;
 
@@ -1336,11 +1469,17 @@ public:
 
   void write_to_dump (dump &d) final override;
 
+  bool is_target_builtin () const { return m_is_target_builtin; }
+
   void validate ();
 
   void dump_to_dot (const char *path);
 
   rvalue *get_address (location *loc);
+  void set_personality_function (function *function);
+
+  void add_attribute (gcc_jit_fn_attribute attribute);
+  void add_string_attribute (gcc_jit_fn_attribute attribute, const char* value);
 
 private:
   string * make_debug_string () final override;
@@ -1357,6 +1496,9 @@ private:
   auto_vec<local *> m_locals;
   auto_vec<block *> m_blocks;
   type *m_fn_ptr_type;
+  std::vector<gcc_jit_fn_attribute> m_attributes;
+  std::vector<std::pair<gcc_jit_fn_attribute, std::string>> m_string_attributes;
+  int m_is_target_builtin;
 };
 
 class block : public memento
@@ -1384,6 +1526,12 @@ public:
   statement *
   add_eval (location *loc,
 	    rvalue *rvalue);
+
+  statement *
+  add_try_catch (location *loc,
+		 block *try_block,
+		 block *catch_block,
+		 bool is_finally = false);
 
   statement *
   add_assignment (location *loc,
@@ -1600,6 +1748,27 @@ private:
   string *m_value;
 };
 
+class memento_of_set_personality_function : public memento
+{
+public:
+  memento_of_set_personality_function (context *ctx,
+				       function *func,
+				       function *personality_function)
+  : memento(ctx),
+    m_function (func),
+    m_personality_function (personality_function) {}
+
+  void replay_into (replayer *r) final override;
+
+private:
+  string * make_debug_string () final override;
+  void write_reproducer (reproducer &r) final override;
+
+private:
+  function *m_function;
+  function *m_personality_function;
+};
+
 class memento_of_new_rvalue_from_vector : public rvalue
 {
 public:
@@ -1623,6 +1792,33 @@ private:
 private:
   vector_type *m_vector_type;
   auto_vec<rvalue *> m_elements;
+};
+
+class memento_of_new_rvalue_vector_perm : public rvalue
+{
+public:
+  memento_of_new_rvalue_vector_perm (context *ctxt,
+				     location *loc,
+				     rvalue *elements1,
+				     rvalue *elements2,
+				     rvalue *mask);
+
+  void replay_into (replayer *r) final override;
+
+  void visit_children (rvalue_visitor *) final override;
+
+private:
+  string * make_debug_string () final override;
+  void write_reproducer (reproducer &r) final override;
+  enum precedence get_precedence () const final override
+  {
+    return PRECEDENCE_PRIMARY;
+  }
+
+private:
+  rvalue *m_elements1;
+  rvalue *m_elements2;
+  rvalue *m_mask;
 };
 
 class ctor : public rvalue
@@ -1907,6 +2103,64 @@ private:
   rvalue *m_index;
 };
 
+class convert_vector : public rvalue
+{
+public:
+  convert_vector (context *ctxt,
+		  location *loc,
+		  rvalue *vector,
+		  type *type)
+  : rvalue (ctxt, loc, type),
+    m_vector (vector),
+    m_type (type)
+  {}
+
+  void replay_into (replayer *r) final override;
+
+  void visit_children (rvalue_visitor *v) final override;
+
+private:
+  string * make_debug_string () final override;
+  void write_reproducer (reproducer &r) final override;
+  enum precedence get_precedence () const final override
+  {
+    return PRECEDENCE_POSTFIX;
+  }
+
+private:
+  rvalue *m_vector;
+  type *m_type;
+};
+
+class vector_access : public lvalue
+{
+public:
+  vector_access (context *ctxt,
+		 location *loc,
+		 rvalue *vector,
+		 rvalue *index)
+  : lvalue (ctxt, loc, vector->get_type ()->dyn_cast_vector_type ()->get_element_type ()),
+    m_vector (vector),
+    m_index (index)
+  {}
+
+  void replay_into (replayer *r) final override;
+
+  void visit_children (rvalue_visitor *v) final override;
+
+private:
+  string * make_debug_string () final override;
+  void write_reproducer (reproducer &r) final override;
+  enum precedence get_precedence () const final override
+  {
+    return PRECEDENCE_POSTFIX;
+  }
+
+private:
+  rvalue *m_vector;
+  rvalue *m_index;
+};
+
 class access_field_of_lvalue : public lvalue
 {
 public:
@@ -2145,6 +2399,31 @@ private:
 
 private:
   rvalue *m_rvalue;
+};
+
+class try_catch : public statement
+{
+public:
+  try_catch (block *b,
+    location *loc,
+    block *try_block,
+    block *catch_block,
+    bool is_finally = false)
+  : statement (b, loc),
+    m_try_block (try_block),
+    m_catch_block (catch_block),
+    m_is_finally (is_finally) {}
+
+  void replay_into (replayer *r) final override;
+
+private:
+  string * make_debug_string () final override;
+  void write_reproducer (reproducer &r) final override;
+
+private:
+  block *m_try_block;
+  block *m_catch_block;
+  bool m_is_finally;
 };
 
 class assignment : public statement

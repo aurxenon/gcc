@@ -20,6 +20,7 @@ along with GCC; see the file COPYING3.  If not see
 
 #include "config.h"
 #define INCLUDE_MUTEX
+#include "libgccjit.h"
 #include "system.h"
 #include "coretypes.h"
 #include "target.h"
@@ -46,6 +47,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "jit-result.h"
 #include "jit-builtins.h"
 #include "jit-tempdir.h"
+#include "jit-target.h"
 
 #ifdef _WIN32
 #include "jit-w32.h"
@@ -280,6 +282,8 @@ get_tree_node_for_type (enum gcc_jit_types type_)
 
     case GCC_JIT_TYPE_FLOAT:
       return float_type_node;
+    case GCC_JIT_TYPE_BFLOAT16:
+      return bfloat16_type_node;
     case GCC_JIT_TYPE_DOUBLE:
       return double_type_node;
     case GCC_JIT_TYPE_LONG_DOUBLE:
@@ -326,7 +330,7 @@ playback::type *
 playback::context::
 new_array_type (playback::location *loc,
 		playback::type *element_type,
-		int num_elements)
+		unsigned long num_elements)
 {
   gcc_assert (element_type);
 
@@ -407,7 +411,8 @@ playback::compound_type *
 playback::context::
 new_compound_type (location *loc,
 		   const char *name,
-		   bool is_struct) /* else is union */
+		   bool is_struct, /* else is union */
+		   bool is_packed)
 {
   gcc_assert (name);
 
@@ -417,6 +422,9 @@ new_compound_type (location *loc,
   TYPE_NAME (t) = get_identifier (name);
   TYPE_SIZE (t) = 0;
 
+  if (is_packed)
+    TYPE_PACKED (t) = 1;
+
   if (loc)
     set_tree_location (t, loc);
 
@@ -424,7 +432,7 @@ new_compound_type (location *loc,
 }
 
 void
-playback::compound_type::set_fields (const auto_vec<playback::field *> *fields)
+playback::compound_type::set_fields (const auto_vec<playback::field *> *fields, bool is_packed)
 {
   /* Compare with c/c-decl.cc: finish_struct. */
   tree t = as_tree ();
@@ -441,6 +449,10 @@ playback::compound_type::set_fields (const auto_vec<playback::field *> *fields)
 	  DECL_SIZE (x) = bitsize_int (width);
 	  DECL_BIT_FIELD (x) = 1;
 	}
+
+      if (is_packed && (DECL_BIT_FIELD (x)
+	      || TYPE_ALIGN (TREE_TYPE (x)) > BITS_PER_UNIT))
+        DECL_PACKED (x) = 1;
       fieldlist = chainon (x, fieldlist);
     }
   fieldlist = nreverse (fieldlist);
@@ -499,6 +511,48 @@ new_param (location *loc,
   return new param (this, inner);
 }
 
+const char* fn_attribute_to_string(gcc_jit_fn_attribute attr)
+{
+  switch (attr)
+  {
+    case GCC_JIT_FN_ATTRIBUTE_ALIAS:
+      return "alias";
+    case GCC_JIT_FN_ATTRIBUTE_ALWAYS_INLINE:
+      return "always_inline";
+    case GCC_JIT_FN_ATTRIBUTE_INLINE:
+      return NULL;
+    case GCC_JIT_FN_ATTRIBUTE_NOINLINE:
+      return "noinline";
+    case GCC_JIT_FN_ATTRIBUTE_TARGET:
+      return "target";
+    case GCC_JIT_FN_ATTRIBUTE_USED:
+      return "used";
+    case GCC_JIT_FN_ATTRIBUTE_VISIBILITY:
+      return "visibility";
+    case GCC_JIT_FN_ATTRIBUTE_COLD:
+      return "cold";
+    case GCC_JIT_FN_ATTRIBUTE_RETURNS_TWICE:
+      return "returns_twice";
+    case GCC_JIT_FN_ATTRIBUTE_PURE:
+      return "pure";
+    case GCC_JIT_FN_ATTRIBUTE_CONST:
+      return "const";
+    case GCC_JIT_FN_ATTRIBUTE_WEAK:
+      return "weak";
+  }
+  return NULL;
+}
+
+const char* variable_attribute_to_string(gcc_jit_variable_attribute attr)
+{
+  switch (attr)
+  {
+    case GCC_JIT_VARIABLE_ATTRIBUTE_VISIBILITY:
+      return "visibility";
+  }
+  return NULL;
+}
+
 /* Construct a playback::function instance.  */
 
 playback::function *
@@ -509,7 +563,10 @@ new_function (location *loc,
 	      const char *name,
 	      const auto_vec<param *> *params,
 	      int is_variadic,
-	      enum built_in_function builtin_id)
+	      enum built_in_function builtin_id,
+	      const std::vector<gcc_jit_fn_attribute> &attributes,
+	      const std::vector<std::pair<gcc_jit_fn_attribute, std::string>> &string_attributes,
+	      int is_target_builtin)
 {
   int i;
   param *param;
@@ -532,6 +589,7 @@ new_function (location *loc,
 
   /* FIXME: this uses input_location: */
   tree fndecl = build_fn_decl (name, fn_type);
+  TREE_NOTHROW (fndecl) = 0;
 
   if (loc)
     set_tree_location (fndecl, loc);
@@ -543,6 +601,14 @@ new_function (location *loc,
   DECL_RESULT (fndecl) = resdecl;
   DECL_CONTEXT (resdecl) = fndecl;
 
+  if (is_target_builtin)
+  {
+    tree *decl = target_builtins.get(name);
+    if (decl != NULL)
+      fndecl = *decl;
+    else
+      add_error (loc, "cannot find target builtin %s", name);
+  }
   if (builtin_id)
     {
       gcc_assert (loc == NULL);
@@ -594,6 +660,73 @@ new_function (location *loc,
 		   DECL_ATTRIBUTES (fndecl));
     }
 
+  for (auto attr: attributes)
+  {
+    if (attr == GCC_JIT_FN_ATTRIBUTE_ALWAYS_INLINE)
+    {
+      DECL_DECLARED_INLINE_P (fndecl) = 1;
+      DECL_DISREGARD_INLINE_LIMITS (fndecl) = 1;
+    }
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_INLINE)
+      DECL_DECLARED_INLINE_P (fndecl) = 1;
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_NOINLINE)
+      DECL_UNINLINABLE (fndecl) = 1;
+    /* See handle_used_attribute in gcc/c-family/c-attribs.cc.  */
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_USED)
+    {
+      TREE_USED (fndecl) = 1;
+      DECL_PRESERVE_P (fndecl) = 1;
+    }
+    /* See handle_returns_twice_attribute in gcc/c-family/c-attribs.cc. */
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_RETURNS_TWICE)
+      DECL_IS_RETURNS_TWICE (fndecl) = 1;
+    /* See handle_pure_attribute in gcc/c-family/c-attribs.cc. */
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_PURE)
+      DECL_PURE_P (fndecl) = 1;
+    /* See handle_const_attribute in gcc/c-family/c-attribs.cc. */
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_CONST)
+      TREE_READONLY (fndecl) = 1;
+    /* See handle_weak_attribute in gcc/c-family/c-attribs.cc.  */
+    else if (attr == GCC_JIT_FN_ATTRIBUTE_WEAK)
+      declare_weak (fndecl);
+
+    const char* attribute = fn_attribute_to_string (attr);
+    if (attribute)
+    {
+      tree ident = get_identifier (attribute);
+      DECL_ATTRIBUTES (fndecl) =
+	tree_cons (ident, NULL_TREE, DECL_ATTRIBUTES (fndecl));
+    }
+  }
+
+  for (auto attr: string_attributes)
+  {
+    gcc_jit_fn_attribute& name = std::get<0>(attr);
+    std::string& value = std::get<1>(attr);
+    tree attribute_value = build_tree_list (NULL_TREE, ::build_string (value.length () + 1, value.c_str ()));
+    const char* attribute = fn_attribute_to_string (name);
+    tree ident = attribute ? get_identifier (attribute) : NULL;
+
+    /* See handle_target_attribute in gcc/c-family/c-attribs.cc.  */
+    if (name == GCC_JIT_FN_ATTRIBUTE_TARGET)
+      /* We need to call valid_attribute_p so that the hook set-up some internal options.  */
+      if (!ident || !targetm.target_option.valid_attribute_p (fndecl, ident, attribute_value, 0))
+        continue;
+
+    /* See handle_alias_ifunc_attribute in gcc/c-family/c-attribs.cc.  */
+    if (name == GCC_JIT_FN_ATTRIBUTE_ALIAS)
+    {
+      tree id = get_identifier (value.c_str ());
+      /* This counts as a use of the object pointed to.  */
+      TREE_USED (id) = 1;
+      DECL_INITIAL (fndecl) = error_mark_node;
+    }
+
+    if (ident)
+      DECL_ATTRIBUTES (fndecl) =
+	tree_cons (ident, attribute_value, DECL_ATTRIBUTES (fndecl));
+  }
+
   function *func = new function (this, fndecl, kind);
   m_functions.safe_push (func);
   return func;
@@ -607,7 +740,9 @@ global_new_decl (location *loc,
 		 enum gcc_jit_global_kind kind,
 		 type *type,
 		 const char *name,
-		 enum global_var_flags flags)
+		 enum global_var_flags flags,
+		 bool readonly,
+		 const std::vector<std::pair<gcc_jit_variable_attribute, std::string>> &attributes)
 {
   gcc_assert (type);
   gcc_assert (name);
@@ -646,13 +781,31 @@ global_new_decl (location *loc,
       break;
     }
 
-  if (TYPE_READONLY (type_tree))
+  if (TYPE_READONLY (type_tree) || readonly)
     TREE_READONLY (inner) = 1;
 
   if (loc)
     set_tree_location (inner, loc);
 
+  set_variable_attribute (attributes, inner);
+
   return inner;
+}
+
+void
+playback::
+set_variable_attribute(const std::vector<std::pair<gcc_jit_variable_attribute, std::string>> &attributes, tree decl)
+{
+  for (auto attr: attributes)
+  {
+    gcc_jit_variable_attribute& name = std::get<0>(attr);
+    std::string& value = std::get<1>(attr);
+    tree attribute_value = build_tree_list (NULL_TREE, ::build_string (value.length () + 1, value.c_str ()));
+    tree ident = get_identifier (variable_attribute_to_string (name));
+
+    DECL_ATTRIBUTES (decl) =
+      tree_cons (ident, attribute_value, DECL_ATTRIBUTES (decl));
+  }
 }
 
 /* In use by new_global and new_global_initialized.  */
@@ -674,10 +827,12 @@ new_global (location *loc,
 	    enum gcc_jit_global_kind kind,
 	    type *type,
 	    const char *name,
-	    enum global_var_flags flags)
+	    enum global_var_flags flags,
+	    bool readonly,
+	    const std::vector<std::pair<gcc_jit_variable_attribute, std::string>> &attributes)
 {
   tree inner =
-    global_new_decl (loc, kind, type, name, flags);
+    global_new_decl (loc, kind, type, name, flags, readonly, attributes);
 
   return global_finalize_lvalue (inner);
 }
@@ -822,9 +977,11 @@ new_global_initialized (location *loc,
 			size_t initializer_num_elem,
 			const void *initializer,
 			const char *name,
-			enum global_var_flags flags)
+			enum global_var_flags flags,
+			bool readonly,
+			const std::vector<std::pair<gcc_jit_variable_attribute, std::string>> &attributes)
 {
-  tree inner = global_new_decl (loc, kind, type, name, flags);
+  tree inner = global_new_decl (loc, kind, type, name, flags, readonly, attributes);
 
   vec<constructor_elt, va_gc> *constructor_elements = NULL;
 
@@ -1007,8 +1164,28 @@ playback::context::new_rvalue_from_vector (location *,
   vec_alloc (v, elements.length ());
   for (unsigned i = 0; i < elements.length (); ++i)
     CONSTRUCTOR_APPEND_ELT (v, NULL_TREE, elements[i]->as_tree ());
-  tree t_ctor = build_constructor (type->as_tree (), v);
+  tree t_ctor;
+  t_ctor = build_constructor (type->as_tree (), v);
   return new rvalue (this, t_ctor);
+}
+
+/* Construct a playback::rvalue instance (wrapping a tree) for a
+   vector perm.  */
+
+playback::rvalue *
+playback::context::new_rvalue_vector_perm (location *loc,
+					   rvalue* elements1,
+					   rvalue* elements2,
+					   rvalue* mask)
+{
+  tree t_elements1 = elements1->as_tree ();
+  tree t_elements2 = elements2->as_tree ();
+  tree t_mask = mask->as_tree ();
+
+  tree t_vector_perm = build3 (VEC_PERM_EXPR, TREE_TYPE (t_elements1), t_elements1, t_elements2, t_mask);
+  if (loc)
+    set_tree_location (t_vector_perm, loc);
+  return new rvalue (this, t_vector_perm);
 }
 
 /* Coerce a tree expression into a boolean tree expression.  */
@@ -1527,6 +1704,163 @@ new_array_access (location *loc,
     }
 }
 
+/* Construct a playback::rvalue instance (wrapping a tree) for a
+   vector conversion.  */
+
+playback::rvalue *
+playback::context::
+convert_vector (location *loc,
+		   rvalue *vector,
+		   type *type)
+{
+  gcc_assert (vector);
+  gcc_assert (type);
+
+  /* For comparison, see:
+       c/c-common.cc: c_build_vec_convert
+  */
+
+  tree t_vector = vector->as_tree ();
+
+  /* It seems IFN_VEC_CONVERT only work on registers, not on memory.  */
+  if (TREE_CODE (t_vector) == VAR_DECL)
+    DECL_REGISTER (t_vector) = 1;
+  tree t_result = build_call_expr_internal_loc (UNKNOWN_LOCATION, IFN_VEC_CONVERT, type->as_tree (), 1, t_vector);
+
+  if (loc)
+    set_tree_location (t_result, loc);
+
+  return new rvalue (this, t_result);
+}
+
+/* The following functions come from c-common.h.  */
+/* Like c_mark_addressable but don't check register qualifier.  */
+void
+common_mark_addressable_vec (tree t)
+{
+  while (handled_component_p (t) || TREE_CODE (t) == C_MAYBE_CONST_EXPR)
+    {
+      t = TREE_OPERAND (t, 0);
+    }
+  if (!VAR_P (t)
+      && TREE_CODE (t) != PARM_DECL
+      && TREE_CODE (t) != COMPOUND_LITERAL_EXPR
+      && TREE_CODE (t) != TARGET_EXPR)
+    return;
+  if (!VAR_P (t) || !DECL_HARD_REGISTER (t))
+    TREE_ADDRESSABLE (t) = 1;
+  if (TREE_CODE (t) == COMPOUND_LITERAL_EXPR)
+    TREE_ADDRESSABLE (COMPOUND_LITERAL_EXPR_DECL (t)) = 1;
+  else if (TREE_CODE (t) == TARGET_EXPR)
+    TREE_ADDRESSABLE (TARGET_EXPR_SLOT (t)) = 1;
+}
+
+/* Return true if TYPE is a vector type that should be subject to the GNU
+   vector extensions (as opposed to a vector type that is used only for
+   the purposes of defining target-specific built-in functions).  */
+
+inline bool
+gnu_vector_type_p (const_tree type)
+{
+  return TREE_CODE (type) == VECTOR_TYPE && !TYPE_INDIVISIBLE_P (type);
+}
+
+/* Return nonzero if REF is an lvalue valid for this language.
+   Lvalues can be assigned, unless their type has TYPE_READONLY.
+   Lvalues can have their address taken, unless they have C_DECL_REGISTER.  */
+
+bool
+lvalue_p (const_tree ref)
+{
+  const enum tree_code code = TREE_CODE (ref);
+
+  switch (code)
+    {
+    case REALPART_EXPR:
+    case IMAGPART_EXPR:
+    case COMPONENT_REF:
+      return lvalue_p (TREE_OPERAND (ref, 0));
+
+    case C_MAYBE_CONST_EXPR:
+      return lvalue_p (TREE_OPERAND (ref, 1));
+
+    case COMPOUND_LITERAL_EXPR:
+    case STRING_CST:
+      return true;
+
+    case MEM_REF:
+    case TARGET_MEM_REF:
+      /* MEM_REFs can appear from -fgimple parsing or folding, so allow them
+	 here as well.  */
+    case INDIRECT_REF:
+    case ARRAY_REF:
+    case VAR_DECL:
+    case PARM_DECL:
+    case RESULT_DECL:
+    case ERROR_MARK:
+      return (TREE_CODE (TREE_TYPE (ref)) != FUNCTION_TYPE
+	      && TREE_CODE (TREE_TYPE (ref)) != METHOD_TYPE);
+
+    case BIND_EXPR:
+      return TREE_CODE (TREE_TYPE (ref)) == ARRAY_TYPE;
+
+    default:
+      return false;
+    }
+}
+
+bool
+convert_vector_to_array_for_subscript (tree *vecp)
+{
+  bool ret = false;
+  if (gnu_vector_type_p (TREE_TYPE (*vecp)))
+    {
+      tree type = TREE_TYPE (*vecp);
+
+      ret = !lvalue_p (*vecp);
+
+      /* We are building an ARRAY_REF so mark the vector as addressable
+         to not run into the gimplifiers premature setting of DECL_GIMPLE_REG_P
+	 for function parameters.  */
+      // NOTE: that was the missing piece for making vector access work with optimizations enabled.
+      common_mark_addressable_vec (*vecp);
+
+      *vecp = build1 (VIEW_CONVERT_EXPR,
+		      build_array_type_nelts (TREE_TYPE (type),
+					      TYPE_VECTOR_SUBPARTS (type)),
+		      *vecp);
+    }
+  return ret;
+}
+
+/* Construct a playback::lvalue instance (wrapping a tree) for a
+   vector access.  */
+
+playback::lvalue *
+playback::context::
+new_vector_access (location *loc,
+		   rvalue *vector,
+		   rvalue *index)
+{
+  gcc_assert (vector);
+  gcc_assert (index);
+
+  /* For comparison, see:
+       c/c-typeck.cc: build_array_ref
+  */
+
+  tree t_vector = vector->as_tree ();
+  bool non_lvalue = convert_vector_to_array_for_subscript (&t_vector);
+  tree type = TREE_TYPE (TREE_TYPE (t_vector));
+  tree t_result = build4 (ARRAY_REF, type, t_vector, index->as_tree (), NULL_TREE, NULL_TREE);
+  if (non_lvalue)
+    t_result = non_lvalue (t_result);
+
+  if (loc)
+    set_tree_location (t_result, loc);
+  return new lvalue (this, t_result);
+}
+
 /* Construct a tree for a field access.  */
 
 tree
@@ -1812,7 +2146,8 @@ playback::lvalue *
 playback::function::
 new_local (location *loc,
 	   type *type,
-	   const char *name)
+	   const char *name,
+	   const std::vector<std::pair<gcc_jit_variable_attribute, std::string>> &attributes)
 {
   gcc_assert (type);
   gcc_assert (name);
@@ -1824,6 +2159,8 @@ new_local (location *loc,
   /* Prepend to BIND_EXPR_VARS: */
   DECL_CHAIN (inner) = BIND_EXPR_VARS (m_inner_bind_expr);
   BIND_EXPR_VARS (m_inner_bind_expr) = inner;
+
+  set_variable_attribute (attributes, inner);
 
   if (loc)
     set_tree_location (inner, loc);
@@ -1857,6 +2194,15 @@ playback::function::get_address (location *loc)
   return new rvalue (m_ctxt, t_fnptr);
 }
 
+/* Construct a new local within this playback::function.  */
+
+void
+playback::function::
+set_personality_function (function *personality_function)
+{
+  DECL_FUNCTION_PERSONALITY (m_inner_fndecl) = personality_function->as_fndecl ();
+}
+
 /* Build a statement list for the function as a whole out of the
    lists of statements for the individual blocks, building labels
    for each block.  */
@@ -1874,6 +2220,11 @@ build_stmt_list ()
     {
       int j;
       tree stmt;
+
+      // Do not add try/catch block to the function.
+      // TODO: explain why.
+      if (b->m_is_try_or_catch)
+        continue;
 
       b->m_label_expr = build1 (LABEL_EXPR,
 				void_type_node,
@@ -1947,6 +2298,9 @@ postprocess ()
 
       current_function_decl = NULL;
     }
+    else
+      /* Add to cgraph to output aliases: */
+      rest_of_decl_compilation (m_inner_fndecl, true, 0);
 }
 
 /* Don't leak vec's internal buffer (in non-GC heap) when we are
@@ -1971,6 +2325,70 @@ add_eval (location *loc,
     set_tree_location (rvalue->as_tree (), loc);
 
   add_stmt (rvalue->as_tree ());
+}
+
+
+void
+playback::block::
+add_try_catch (location *loc,
+         block *try_block,
+         block *catch_block,
+         bool is_finally)
+{
+  gcc_assert (try_block);
+  gcc_assert (catch_block);
+
+  try_block->m_is_try_or_catch = true;
+  catch_block->m_is_try_or_catch = true;
+
+  if (loc)
+  {
+    set_tree_location (try_block->as_label_decl (), loc);
+    set_tree_location (catch_block->as_label_decl (), loc);
+  }
+
+  tree try_body = alloc_stmt_list ();
+  unsigned int i;
+  tree stmt;
+  FOR_EACH_VEC_ELT (try_block->m_stmts, i, stmt) {
+    append_to_statement_list (stmt, &try_body);
+  }
+
+  tree catch_body = alloc_stmt_list ();
+  unsigned int j;
+  tree catch_stmt;
+  FOR_EACH_VEC_ELT (catch_block->m_stmts, j, catch_stmt) {
+    append_to_statement_list (catch_stmt, &catch_body);
+  }
+
+  if (is_finally)
+  {
+    tree success_body = alloc_stmt_list ();
+
+    // TODO: find a better way to keep the EH_ELSE_EXPR than creating an empty inline asm.
+  tree t_string = build_string ("");
+  tree asm_stmt
+    = build5 (ASM_EXPR, void_type_node, t_string, NULL_TREE, NULL_TREE, NULL_TREE, NULL_TREE);
+
+  // asm statements without outputs, including simple ones, are treated
+  //   as volatile.
+  ASM_VOLATILE_P (asm_stmt) = 1;
+  ASM_INPUT_P (asm_stmt) = 0;
+    append_to_statement_list (asm_stmt, &success_body);
+
+    // TODO: Don't automatically add the `EH_ELSE_EXPR`. Make an API to create such a node and let the user of libgccjit
+    // add it manually.
+    catch_body = build2 (EH_ELSE_EXPR, void_type_node, success_body, catch_body);
+    add_stmt (build2 (TRY_FINALLY_EXPR, void_type_node,
+            try_body, catch_body));
+  }
+  else
+  {
+    catch_body = build2(CATCH_EXPR, void_type_node, NULL, catch_body);
+    tree try_catch = build2 (TRY_CATCH_EXPR, void_type_node,
+            try_body, catch_body);
+    add_stmt (try_catch);
+  }
 }
 
 /* Add an assignment to the function's statement list.  */
@@ -3226,6 +3644,7 @@ replay ()
   JIT_LOG_SCOPE (get_logger ());
 
   init_types ();
+  jit_target_init ();
 
   /* Replay the recorded events:  */
   timevar_push (TV_JIT_REPLAY);

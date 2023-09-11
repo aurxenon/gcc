@@ -840,9 +840,9 @@ recording::context::get_int_type (int num_bytes, int is_signed)
 recording::type *
 recording::context::new_array_type (recording::location *loc,
 				    recording::type *element_type,
-				    int num_elements)
+				    unsigned long num_elements)
 {
-  if (struct_ *s = element_type->dyn_cast_struct ())
+  /*if (struct_ *s = element_type->dyn_cast_struct ())
     if (!s->get_fields ())
       {
 	add_error (NULL,
@@ -850,7 +850,7 @@ recording::context::new_array_type (recording::location *loc,
 		   " until the fields have been set",
 		   s->get_name ()->c_str ());
 	return NULL;
-      }
+      }*/
   recording::type *result =
     new recording::array_type (this, loc, element_type, num_elements);
   record (result);
@@ -933,14 +933,16 @@ recording::function_type *
 recording::context::new_function_type (recording::type *return_type,
 				       int num_params,
 				       recording::type **param_types,
-				       int is_variadic)
+				       int is_variadic,
+				       int is_target_builtin)
 {
   recording::function_type *fn_type
     = new function_type (this,
 			 return_type,
 			 num_params,
 			 param_types,
-			 is_variadic);
+			 is_variadic,
+			 is_target_builtin);
   record (fn_type);
   return fn_type;
 }
@@ -962,7 +964,8 @@ recording::context::new_function_ptr_type (recording::location *, /* unused loc 
     = new_function_type (return_type,
 			 num_params,
 			 param_types,
-			 is_variadic);
+			 is_variadic,
+			 false);
 
   /* Return a pointer-type to the function type.  */
   return fn_type->get_pointer ();
@@ -1005,7 +1008,7 @@ recording::context::new_function (recording::location *loc,
 			     loc, kind, return_type,
 			     new_string (name),
 			     num_params, params, is_variadic,
-			     builtin_id);
+			     builtin_id, false);
   record (result);
   m_functions.safe_push (result);
 
@@ -1042,6 +1045,52 @@ recording::context::get_builtin_function (const char *name)
 {
   builtins_manager *bm = get_builtins_manager ();
   return bm->get_builtin_function (name);
+}
+
+/* Create a recording::function instance for a target-specific builtin.
+
+   Implements the post-error-checking part of
+   gcc_jit_context_get_target_builtin_function.  */
+
+recording::function *
+recording::context::get_target_builtin_function (const char *name)
+{
+  const char *asm_name = name;
+  if (target_function_types.count (name) == 0)
+  {
+    fprintf (stderr, "Cannot find target builtin %s\n", name);
+    return NULL;
+  }
+
+  recording::function_type* func_type = target_function_types[name]->copy (this)->dyn_cast_function_type ();
+  const vec<type *>& param_types = func_type->get_param_types ();
+  recording::param **params = new recording::param *[param_types.length ()];
+
+  int i;
+  recording::type *param_type;
+  FOR_EACH_VEC_ELT (param_types, i, param_type)
+    {
+      char buf[16];
+      snprintf (buf, 16, "arg%d", i);
+      params[i] = new_param (NULL,
+			     param_type,
+			     buf);
+  }
+
+  recording::function *result =
+    new recording::function (this,
+                 NULL,
+                 GCC_JIT_FUNCTION_IMPORTED, // FIXME
+                 func_type->get_return_type (),
+                 new_string (asm_name),
+                 param_types.length (),
+                 params,
+                 func_type->is_variadic (),
+                 BUILT_IN_NONE,
+                 true);
+  record (result);
+
+  return result;
 }
 
 /* Create a recording::global instance and add it to this context's list
@@ -1104,6 +1153,18 @@ recording::context::new_rvalue_from_vector (location *loc,
 {
   recording::rvalue *result
     = new memento_of_new_rvalue_from_vector (this, loc, type, elements);
+  record (result);
+  return result;
+}
+
+recording::rvalue *
+recording::context::new_rvalue_vector_perm (location *loc,
+			  rvalue *elements1,
+			  rvalue *elements2,
+			  rvalue *mask)
+{
+  recording::rvalue *result
+    = new memento_of_new_rvalue_vector_perm (this, loc, elements1, elements2, mask);
   record (result);
   return result;
 }
@@ -1305,6 +1366,39 @@ recording::context::new_array_access (recording::location *loc,
 				      recording::rvalue *index)
 {
   recording::lvalue *result = new array_access (this, loc, ptr, index);
+  record (result);
+  return result;
+}
+
+/* Create a recording::convert_vector instance and add it to this context's list
+   of mementos.
+
+   Implements the post-error-checking part of
+   gcc_jit_context_convert_vector.  */
+
+recording::rvalue *
+recording::context::new_convert_vector (recording::location *loc,
+				    recording::rvalue *vector,
+				    recording::type *type)
+{
+  // TODO: instead have an "internal function" memento?
+  recording::rvalue *result = new convert_vector (this, loc, vector, type);
+  record (result);
+  return result;
+}
+
+/* Create a recording::vector_access instance and add it to this context's list
+   of mementos.
+
+   Implements the post-error-checking part of
+   gcc_jit_context_new_vector_access.  */
+
+recording::lvalue *
+recording::context::new_vector_access (recording::location *loc,
+				      recording::rvalue *vector,
+				      recording::rvalue *index)
+{
+  recording::lvalue *result = new vector_access (this, loc, vector, index);
   record (result);
   return result;
 }
@@ -1520,6 +1614,25 @@ recording::context::compile_to_file (enum gcc_jit_output_kind output_kind,
   ::gcc::jit::playback::compile_to_file replayer (this,
 						  output_kind,
 						  output_path);
+
+  /* Use it.  */
+  replayer.compile ();
+}
+
+void
+recording::context::get_target_info ()
+{
+  JIT_LOG_SCOPE (get_logger ());
+
+  log_all_options ();
+
+  if (errors_occurred ())
+    return;
+
+  add_driver_option ("-fsyntax-only");
+
+  /* Set up a get_target_info playback context.  */
+  ::gcc::jit::playback::get_target_info replayer (this);
 
   /* Use it.  */
   replayer.compile ();
@@ -2307,6 +2420,12 @@ recording::type::get_aligned (size_t alignment_in_bytes)
   return result;
 }
 
+void
+recording::type::set_packed ()
+{
+  m_packed = true;
+}
+
 /* Given a type, get a vector version of the type.
 
    Implements the post-error-checking part of
@@ -2385,6 +2504,10 @@ recording::memento_of_get_type::get_size ()
     case GCC_JIT_TYPE_FLOAT:
       size = FLOAT_TYPE_SIZE;
       break;
+    #ifdef HAVE_BFmode
+    case GCC_JIT_TYPE_BFLOAT16:
+      return GET_MODE_UNIT_SIZE (BFmode);
+    #endif
     case GCC_JIT_TYPE_DOUBLE:
       size = DOUBLE_TYPE_SIZE;
       break;
@@ -2444,6 +2567,7 @@ recording::memento_of_get_type::dereference ()
     case GCC_JIT_TYPE_INT64_T:
     case GCC_JIT_TYPE_INT128_T:
     case GCC_JIT_TYPE_FLOAT:
+    case GCC_JIT_TYPE_BFLOAT16:
     case GCC_JIT_TYPE_DOUBLE:
     case GCC_JIT_TYPE_LONG_DOUBLE:
     case GCC_JIT_TYPE_COMPLEX_FLOAT:
@@ -2508,6 +2632,7 @@ recording::memento_of_get_type::is_int () const
       return true;
 
     case GCC_JIT_TYPE_FLOAT:
+    case GCC_JIT_TYPE_BFLOAT16:
     case GCC_JIT_TYPE_DOUBLE:
     case GCC_JIT_TYPE_LONG_DOUBLE:
       return false;
@@ -2566,6 +2691,7 @@ recording::memento_of_get_type::is_signed () const
     case GCC_JIT_TYPE_UINT128_T:
 
     case GCC_JIT_TYPE_FLOAT:
+    case GCC_JIT_TYPE_BFLOAT16:
     case GCC_JIT_TYPE_DOUBLE:
     case GCC_JIT_TYPE_LONG_DOUBLE:
 
@@ -2625,6 +2751,7 @@ recording::memento_of_get_type::is_float () const
       return false;
 
     case GCC_JIT_TYPE_FLOAT:
+    case GCC_JIT_TYPE_BFLOAT16:
     case GCC_JIT_TYPE_DOUBLE:
     case GCC_JIT_TYPE_LONG_DOUBLE:
       return true;
@@ -2688,6 +2815,7 @@ recording::memento_of_get_type::is_bool () const
       return false;
 
     case GCC_JIT_TYPE_FLOAT:
+    case GCC_JIT_TYPE_BFLOAT16:
     case GCC_JIT_TYPE_DOUBLE:
     case GCC_JIT_TYPE_LONG_DOUBLE:
       return false;
@@ -2767,6 +2895,7 @@ static const char * const get_type_strings[] = {
   "__int32_t",    /* GCC_JIT_TYPE_INT32_T */
   "__int64_t",    /* GCC_JIT_TYPE_INT64_T */
   "__int128_t",   /* GCC_JIT_TYPE_INT128_T */
+  "bfloat16",     /* GCC_JIT_TYPE_BFLOAT16 */
 
 };
 
@@ -2813,6 +2942,7 @@ static const char * const get_type_enum_strings[] = {
   "GCC_JIT_TYPE_INT32_T",
   "GCC_JIT_TYPE_INT64_T",
   "GCC_JIT_TYPE_INT128_T",
+  "GCC_JIT_TYPE_BFLOAT16",
 };
 
 void
@@ -3113,7 +3243,7 @@ recording::string *
 recording::array_type::make_debug_string ()
 {
   return string::from_printf (m_ctxt,
-			      "%s[%d]",
+			      "%s[%ld]",
 			      m_element_type->get_debug_string (),
 			      m_num_elements);
 }
@@ -3129,7 +3259,7 @@ recording::array_type::write_reproducer (reproducer &r)
 	   "    gcc_jit_context_new_array_type (%s,\n"
 	   "                                    %s, /* gcc_jit_location *loc */\n"
 	   "                                    %s, /* gcc_jit_type *element_type */\n"
-	   "                                    %i); /* int num_elements */\n",
+	   "                                    %li); /* int num_elements */\n",
 	   id,
 	   r.get_identifier (get_context ()),
 	   r.get_identifier (m_loc),
@@ -3145,11 +3275,13 @@ recording::function_type::function_type (context *ctxt,
 					 type *return_type,
 					 int num_params,
 					 type **param_types,
-					 int is_variadic)
+					 int is_variadic,
+					 int is_target_builtin)
 : type (ctxt),
   m_return_type (return_type),
   m_param_types (),
-  m_is_variadic (is_variadic)
+  m_is_variadic (is_variadic),
+  m_is_target_builtin (is_target_builtin)
 {
   for (int i = 0; i< num_params; i++)
     m_param_types.safe_push (param_types[i]);
@@ -3531,7 +3663,8 @@ recording::struct_::replay_into (replayer *r)
   set_playback_obj (
     r->new_compound_type (playback_location (r, get_loc ()),
 			  get_name ()->c_str (),
-			  true /* is_struct */));
+			  true, /* is_struct */
+			  m_packed));
 }
 
 const char *
@@ -3585,7 +3718,8 @@ recording::union_::replay_into (replayer *r)
   set_playback_obj (
     r->new_compound_type (playback_location (r, get_loc ()),
 			  get_name ()->c_str (),
-			  false /* is_struct */));
+			  false, /* is_struct */
+			  m_packed));
 }
 
 /* Implementation of recording::memento::make_debug_string for
@@ -3656,7 +3790,7 @@ recording::fields::replay_into (replayer *)
   playback_fields.create (m_fields.length ());
   for (unsigned i = 0; i < m_fields.length (); i++)
     playback_fields.safe_push (m_fields[i]->playback_field ());
-  m_struct_or_union->playback_compound_type ()->set_fields (&playback_fields);
+  m_struct_or_union->playback_compound_type ()->set_fields (&playback_fields, m_struct_or_union->m_packed);
 }
 
 /* Override the default implementation of
@@ -4026,6 +4160,11 @@ void recording::lvalue::set_alignment (unsigned bytes)
   m_alignment = bytes;
 }
 
+void recording::lvalue::add_attribute (gcc_jit_variable_attribute attribute, const char* value)
+{
+  m_attributes.push_back (std::make_pair (attribute, std::string (value)));
+}
+
 /* The implementation of class gcc::jit::recording::param.  */
 
 /* Implementation of pure virtual hook recording::memento::replay_into
@@ -4091,7 +4230,8 @@ recording::function::function (context *ctxt,
 			       int num_params,
 			       recording::param **params,
 			       int is_variadic,
-			       enum built_in_function builtin_id)
+			       enum built_in_function builtin_id,
+			       int is_target_builtin)
 : memento (ctxt),
   m_loc (loc),
   m_kind (kind),
@@ -4102,7 +4242,10 @@ recording::function::function (context *ctxt,
   m_builtin_id (builtin_id),
   m_locals (),
   m_blocks (),
-  m_fn_ptr_type (NULL)
+  m_fn_ptr_type (NULL),
+  m_attributes(),
+  m_string_attributes(),
+  m_is_target_builtin (is_target_builtin)
 {
   for (int i = 0; i< num_params; i++)
     {
@@ -4161,7 +4304,40 @@ recording::function::replay_into (replayer *r)
 				     m_name->c_str (),
 				     &params,
 				     m_is_variadic,
-				     m_builtin_id));
+				     m_builtin_id,
+				     m_attributes,
+				     m_string_attributes,
+				     m_is_target_builtin));
+}
+
+/* Implementation of recording::memento::make_debug_string for
+   setting a personality function.  */
+
+recording::string *
+recording::memento_of_set_personality_function::make_debug_string ()
+{
+  return string::from_printf (m_ctxt,
+			      "%s",
+			      m_personality_function->get_debug_string ());
+}
+
+/* Implementation of recording::memento::write_reproducer for setting the personality function. */
+
+void
+recording::memento_of_set_personality_function::write_reproducer (reproducer &r)
+{
+  r.write ("    gcc_jit_function_set_personality_function (%s,\n"
+	   "                                               %s);\n",
+	   r.get_identifier (m_function),
+	   r.get_identifier (m_personality_function));
+}
+
+void
+recording::function::set_personality_function (function *function)
+{
+  recording::memento_of_set_personality_function *result =
+    new memento_of_set_personality_function (m_ctxt, this, function);
+  m_ctxt->record (result);
 }
 
 /* Create a recording::local instance and add it to
@@ -4306,6 +4482,13 @@ recording::function::validate ()
       /* Iteratively walk the graph of blocks, marking their "m_is_reachable"
 	 flag, starting at the initial block.  */
       auto_vec<block *> worklist (m_blocks.length ());
+      int j;
+      block *func_block;
+      /* Push the blocks used in try/catch because they're not successors of
+         other blocks.  */
+      FOR_EACH_VEC_ELT (m_blocks, j, func_block)
+      if (func_block->m_is_reachable)
+	worklist.safe_push (func_block);
       worklist.safe_push (m_blocks[0]);
       while (worklist.length () > 0)
 	{
@@ -4394,7 +4577,8 @@ recording::function::get_address (recording::location *loc)
 	= m_ctxt->new_function_type (m_return_type,
 				     m_params.length (),
 				     param_types.address (),
-				     m_is_variadic);
+				     m_is_variadic,
+				     m_is_target_builtin);
       m_fn_ptr_type = fn_type->get_pointer ();
     }
   gcc_assert (m_fn_ptr_type);
@@ -4402,6 +4586,18 @@ recording::function::get_address (recording::location *loc)
   rvalue *result = new function_pointer (get_context (), loc, this, m_fn_ptr_type);
   m_ctxt->record (result);
   return result;
+}
+
+void
+recording::function::add_attribute (gcc_jit_fn_attribute attribute)
+{
+  m_attributes.push_back (attribute);
+}
+
+void
+recording::function::add_string_attribute (gcc_jit_fn_attribute attribute, const char* value)
+{
+  m_string_attributes.push_back (std::make_pair (attribute, std::string (value)));
 }
 
 /* Implementation of recording::memento::make_debug_string for
@@ -4483,6 +4679,31 @@ recording::block::add_eval (recording::location *loc,
 			    recording::rvalue *rvalue)
 {
   statement *result = new eval (this, loc, rvalue);
+  m_ctxt->record (result);
+  m_statements.safe_push (result);
+  return result;
+}
+
+/* The implementation of class gcc::jit::recording::block.  */
+
+/* Create a recording::try_catch instance and add it to
+   the block's context's list of mementos, and to the block's
+   list of statements.
+   Implements the heart of gcc_jit_block_add_try_catch.  */
+
+recording::statement *
+recording::block::add_try_catch (location *loc,
+                   block *try_block,
+                   block *catch_block,
+                   bool is_finally)
+{
+  statement *result = new try_catch (this, loc, try_block, catch_block, is_finally);
+  // TODO: explain why we set the blocks reachable state.
+  try_block->m_is_reachable = true;
+  catch_block->m_is_reachable = true;
+  /* The finally block can fallthrough, so we don't require the user to terminate it.  */
+  if (is_finally)
+    catch_block->m_has_been_terminated = true;
   m_ctxt->record (result);
   m_statements.safe_push (result);
   return result;
@@ -4879,12 +5100,16 @@ recording::global::replay_into (replayer *r)
 				 / m_type->dereference ()->get_size (),
 				 m_initializer,
 				 playback_string (m_name),
-				 m_flags)
+				 m_flags,
+				 m_readonly,
+				 m_attributes)
     : r->new_global (playback_location (r, m_loc),
 		     m_kind,
 		     m_type->playback_type (),
 		     playback_string (m_name),
-		     m_flags);
+		     m_flags,
+		     m_readonly,
+		     m_attributes);
 
   if (m_tls_model != GCC_JIT_TLS_MODEL_NONE)
     global->set_tls_model (recording::tls_models[m_tls_model]);
@@ -5436,6 +5661,91 @@ recording::memento_of_new_rvalue_from_vector::write_reproducer (reproducer &r)
 	   m_elements.length (),
 	   elements_id);
 }
+
+/* The implementation of class
+   gcc::jit::recording::memento_of_new_rvalue_vector_perm.  */
+
+/* The constructor for
+   gcc::jit::recording::memento_of_new_rvalue_vector_perm.  */
+
+recording::memento_of_new_rvalue_vector_perm::
+memento_of_new_rvalue_vector_perm (context *ctxt,
+				   location *loc,
+				   rvalue *elements1,
+				   rvalue *elements2,
+				   rvalue *mask)
+: rvalue (ctxt, loc, elements1->get_type ()),
+  m_elements1 (elements1),
+  m_elements2 (elements2),
+  m_mask (mask)
+{
+}
+
+/* Implementation of pure virtual hook recording::memento::replay_into
+   for recording::memento_of_new_rvalue_vector_perm.  */
+
+void
+recording::memento_of_new_rvalue_vector_perm::replay_into (replayer *r)
+{
+  playback::rvalue *playback_elements1 = m_elements1->playback_rvalue ();
+  playback::rvalue *playback_elements2 = m_elements2->playback_rvalue ();
+  playback::rvalue *playback_mask = m_mask->playback_rvalue ();
+
+    set_playback_obj (r->new_rvalue_vector_perm (playback_location (r, m_loc),
+                playback_elements1,
+                playback_elements2,
+                playback_mask));
+}
+
+/* Implementation of pure virtual hook recording::rvalue::visit_children
+   for recording::memento_of_new_rvalue_from_vector.  */
+
+    void
+recording::memento_of_new_rvalue_vector_perm::visit_children (rvalue_visitor *v)
+{
+  v->visit (m_elements1);
+  v->visit (m_elements2);
+  v->visit (m_mask);
+}
+
+/* Implementation of recording::memento::make_debug_string for
+   vectors.  */
+
+    recording::string *
+recording::memento_of_new_rvalue_vector_perm::make_debug_string ()
+{
+    /* Now build a string.  */
+    string *result = string::from_printf (m_ctxt,
+            "shufflevector(%s, %s, %s)",
+            m_elements1->get_debug_string (),
+            m_elements2->get_debug_string (),
+            m_mask->get_debug_string ());
+
+    return result;
+
+}
+
+/* Implementation of recording::memento::write_reproducer for
+   vectors.  */
+
+    void
+recording::memento_of_new_rvalue_vector_perm::write_reproducer (reproducer &r)
+{
+    const char *id = r.make_identifier (this, "vector");
+  r.write ("  gcc_jit_rvalue *%s =\n"
+	   "    gcc_jit_context_new_rvalue_vector_perm (%s, /* gcc_jit_context *ctxt */\n"
+	   "                                            %s, /* gcc_jit_location *loc */\n"
+	   "                                            %s, /* gcc_jit_rvalue **elements1*/\n"
+	   "                                            %s, /* gcc_jit_rvalue **elements2*/\n"
+	   "                                            %s); /* gcc_jit_rvalue **mask*/\n",
+	   id,
+	   r.get_identifier (get_context ()),
+	   r.get_identifier (m_loc),
+	   r.get_identifier_as_rvalue (m_elements1),
+	   r.get_identifier_as_rvalue (m_elements2),
+	   r.get_identifier_as_rvalue (m_mask));
+}
+
 
 void
 recording::ctor::visit_children (rvalue_visitor *v)
@@ -6307,6 +6617,114 @@ recording::array_access::write_reproducer (reproducer &r)
 	   r.get_identifier_as_rvalue (m_index));
 }
 
+/* The implementation of class gcc::jit::recording::convert_vector.  */
+
+/* Implementation of pure virtual hook recording::memento::replay_into
+   for recording::convert_vector.  */
+
+void
+recording::convert_vector::replay_into (replayer *r)
+{
+  set_playback_obj (
+    r->convert_vector (playback_location (r, m_loc),
+			  m_vector->playback_rvalue (),
+			  m_type->playback_type ()));
+}
+
+/* Implementation of pure virtual hook recording::rvalue::visit_children
+   for recording::convert_vector.  */
+
+void
+recording::convert_vector::visit_children (rvalue_visitor *v)
+{
+  v->visit (m_vector);
+}
+
+/* The implementation of class gcc::jit::recording::vector_access.  */
+
+/* Implementation of pure virtual hook recording::memento::replay_into
+   for recording::vector_access.  */
+
+void
+recording::vector_access::replay_into (replayer *r)
+{
+  set_playback_obj (
+    r->new_vector_access (playback_location (r, m_loc),
+			  m_vector->playback_rvalue (),
+			  m_index->playback_rvalue ()));
+}
+
+/* Implementation of pure virtual hook recording::rvalue::visit_children
+   for recording::vector_access.  */
+
+void
+recording::vector_access::visit_children (rvalue_visitor *v)
+{
+  v->visit (m_vector);
+  v->visit (m_index);
+}
+
+/* Implementation of recording::memento::make_debug_string for
+   array accesses.  */
+
+recording::string *
+recording::convert_vector::make_debug_string ()
+{
+  enum precedence prec = get_precedence ();
+  return string::from_printf (m_ctxt,
+			      "(%s)%s",
+			      m_type->get_debug_string (),
+			      m_vector->get_debug_string_parens (prec));
+}
+
+/* Implementation of recording::memento::write_reproducer for
+   convert_vector.  */
+
+void
+recording::convert_vector::write_reproducer (reproducer &r)
+{
+  const char *id = r.make_identifier (this, "lvalue");
+  r.write ("  gcc_jit_lvalue *%s = \n"
+	   "    gcc_jit_context_convert_vector (%s, /* gcc_jit_context *ctxt */\n"
+	   "                                    %s, /*gcc_jit_location *loc */\n"
+	   "                                    %s, /* gcc_jit_rvalue *vector */\n"
+	   "                                    %s); /* gcc_jit_type *type */\n",
+	   id,
+	   r.get_identifier (get_context ()),
+	   r.get_identifier (m_loc),
+	   r.get_identifier_as_rvalue (m_vector),
+	   r.get_identifier_as_type (m_type));
+}
+
+recording::string *
+recording::vector_access::make_debug_string ()
+{
+  enum precedence prec = get_precedence ();
+  return string::from_printf (m_ctxt,
+			      "%s[%s]",
+			      m_vector->get_debug_string_parens (prec),
+			      m_index->get_debug_string_parens (prec));
+}
+
+/* Implementation of recording::memento::write_reproducer for
+   vector_access.  */
+
+void
+recording::vector_access::write_reproducer (reproducer &r)
+{
+  const char *id = r.make_identifier (this, "lvalue");
+  r.write ("  gcc_jit_lvalue *%s = \n"
+	   "    gcc_jit_context_new_vector_access (%s, /* gcc_jit_context *ctxt */\n"
+	   "                                       %s, /*gcc_jit_location *loc */\n"
+	   "                                       %s, /* gcc_jit_rvalue *vector */\n"
+	   "                                       %s); /* gcc_jit_rvalue *index */\n",
+	   id,
+	   r.get_identifier (get_context ()),
+	   r.get_identifier (m_loc),
+	   r.get_identifier_as_rvalue (m_vector),
+	   r.get_identifier_as_rvalue (m_index));
+}
+
 /* The implementation of class gcc::jit::recording::access_field_of_lvalue.  */
 
 /* Implementation of pure virtual hook recording::memento::replay_into
@@ -6622,7 +7040,8 @@ recording::local::replay_into (replayer *r)
   playback::lvalue *obj = m_func->playback_function ()
       ->new_local (playback_location (r, m_loc),
 		   m_type->playback_type (),
-		   playback_string (m_name));
+		   playback_string (m_name),
+		   m_attributes);
 
   if (m_reg_name != NULL)
     obj->set_register_name (m_reg_name->c_str ());
@@ -6696,6 +7115,17 @@ recording::statement::write_to_dump (dump &d)
     m_loc = d.make_location ();
 }
 
+/* The implementation of class gcc::jit::recording::memento_of_set_personality_function.  */
+
+/* Implementation of pure virtual hook recording::memento::replay_into
+   for recording::memento_of_set_personality_function.  */
+
+void
+recording::memento_of_set_personality_function::replay_into (replayer *r)
+{
+  m_function->playback_function ()->set_personality_function (m_personality_function->playback_function ());
+}
+
 /* The implementation of class gcc::jit::recording::eval.  */
 
 /* Implementation of pure virtual hook recording::memento::replay_into
@@ -6732,6 +7162,59 @@ recording::eval::write_reproducer (reproducer &r)
 	   r.get_identifier (get_block ()),
 	   r.get_identifier (get_loc ()),
 	   r.get_identifier_as_rvalue (m_rvalue));
+}
+
+/* The implementation of class gcc::jit::recording::try_catch.  */
+
+/* Implementation of pure virtual hook recording::memento::replay_into
+   for recording::try_catch.  */
+
+void
+recording::try_catch::replay_into (replayer *r)
+{
+  playback_block (get_block ())
+    ->add_try_catch (playback_location (r),
+        m_try_block->playback_block (),
+        m_catch_block->playback_block (),
+        m_is_finally);
+}
+
+/* Implementation of recording::memento::make_debug_string for
+   an eval statement.  */
+
+recording::string *
+recording::try_catch::make_debug_string ()
+{
+  if (m_is_finally)
+    return string::from_printf (m_ctxt,
+                  "try { %s } finally { %s };",
+                  m_try_block->get_debug_string (),
+                  m_catch_block->get_debug_string ());
+  else
+    return string::from_printf (m_ctxt,
+                  "try { %s } catch { %s };",
+                  m_try_block->get_debug_string (),
+                  m_catch_block->get_debug_string ());
+}
+
+/* Implementation of recording::memento::write_reproducer for
+   eval statements.  */
+
+void
+recording::try_catch::write_reproducer (reproducer &r)
+{
+  const char *func_name = "gcc_jit_block_add_try_catch";
+  if (m_is_finally)
+    func_name = "gcc_jit_block_add_try_finally";
+  r.write ("  %s (%s, /*gcc_jit_block *block */\n"
+       "                                 %s, /* gcc_jit_location *loc */\n"
+       "                                 %s, /* gcc_jit_block *try_block */\n"
+       "                                 %s); /* gcc_jit_block *catch_block */\n",
+       func_name,
+       r.get_identifier (get_block ()),
+       r.get_identifier (get_loc ()),
+       r.get_identifier (m_try_block),
+       r.get_identifier (m_catch_block));
 }
 
 /* The implementation of class gcc::jit::recording::assignment.  */

@@ -20,6 +20,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "target.h"
 #include "jit-playback.h"
 #include "stor-layout.h"
 #include "debug.h"
@@ -29,8 +30,14 @@ along with GCC; see the file COPYING3.  If not see
 #include "options.h"
 #include "stringpool.h"
 #include "attribs.h"
+#include "jit-recording.h"
+#include "print-tree.h"
 
 #include <mpfr.h>
+#include <unordered_map>
+#include <string>
+
+using namespace gcc::jit;
 
 /* Attribute handling.  */
 
@@ -85,6 +92,10 @@ static const struct attribute_spec::exclusions attr_const_pure_exclusions[] =
   ATTR_EXCL ("pure", true, true, true),
   ATTR_EXCL (NULL, false, false, false)
 };
+
+hash_map<nofree_string_hash, tree> target_builtins{};
+std::unordered_map<std::string, recording::function_type*> target_function_types{};
+recording::context target_builtins_ctxt{NULL};
 
 /* Table of machine-independent attributes supported in libgccjit.  */
 const struct attribute_spec jit_attribute_table[] =
@@ -145,6 +156,20 @@ const struct attribute_spec jit_format_attribute_table[] =
 			      handle_format_arg_attribute, NULL },
   { NULL,                     0, 0, false, false, false, false, NULL, NULL }
 };
+
+char* jit_personality_func_name = NULL;
+static tree personality_decl;
+
+/* FIXME: This is a hack to preserve trees that we create from the
+   garbage collector.  */
+
+static GTY (()) tree jit_gc_root;
+
+void
+jit_preserve_from_gc (tree t)
+{
+  jit_gc_root = tree_cons (NULL_TREE, t, jit_gc_root);
+}
 
 /* Attribute handlers.  */
 
@@ -507,12 +532,12 @@ struct GTY(()) lang_identifier
 /* The resulting tree type.  */
 
 union GTY((desc ("TREE_CODE (&%h.generic) == IDENTIFIER_NODE"),
-	   chain_next ("CODE_CONTAINS_STRUCT (TREE_CODE (&%h.generic), TS_COMMON) ? ((union lang_tree_node *) TREE_CHAIN (&%h.generic)) : NULL")))
-lang_tree_node
-{
-  union tree_node GTY((tag ("0"),
-		       desc ("tree_node_structure (&%h)"))) generic;
-  struct lang_identifier GTY((tag ("1"))) identifier;
+       chain_next ("(union lang_tree_node *) jit_tree_chain_next (&%h.generic)"))) lang_tree_node
+ {
+  union tree_node GTY ((tag ("0"),
+			desc ("tree_node_structure (&%h)")))
+    generic;
+  struct lang_identifier GTY ((tag ("1"))) identifier;
 };
 
 /* We don't use language_function.  */
@@ -578,6 +603,8 @@ jit_end_diagnostic (diagnostic_context *context,
 static bool
 jit_langhook_init (void)
 {
+  jit_gc_root = NULL_TREE;
+  personality_decl = NULL_TREE;
   gcc_assert (gcc::jit::active_playback_ctxt);
   JIT_LOG_SCOPE (gcc::jit::active_playback_ctxt->get_logger ());
 
@@ -592,14 +619,24 @@ jit_langhook_init (void)
   global_dc->begin_diagnostic = jit_begin_diagnostic;
   global_dc->end_diagnostic = jit_end_diagnostic;
 
-  build_common_tree_nodes (false);
+  build_common_tree_nodes (flag_signed_char);
 
+  /* I don't know why this has to be done explicitly.  */
+  void_list_node = build_tree_list (NULL_TREE, void_type_node);
+
+  target_builtins.empty ();
   build_common_builtin_nodes ();
+
+  /* Initialize EH, if we've been told to do so.  */
+  if (flag_exceptions)
+    using_eh_for_cleanups ();
 
   /* The default precision for floating point numbers.  This is used
      for floating point constants with abstract type.  This may
      eventually be controllable by a command line option.  */
   mpfr_set_default_prec (256);
+
+  targetm.init_builtins ();
 
   return true;
 }
@@ -668,11 +705,216 @@ jit_langhook_type_for_mode (machine_mode mode, int unsignedp)
   return NULL;
 }
 
-/* Record a builtin function.  We just ignore builtin functions.  */
+recording::type* tree_type_to_jit_type (tree type)
+{
+  if (TREE_CODE (type) == VECTOR_TYPE)
+  {
+    tree inner_type = TREE_TYPE (type);
+    recording::type* element_type = tree_type_to_jit_type (inner_type);
+    poly_uint64 size = TYPE_VECTOR_SUBPARTS (type);
+    long constant_size = size.to_constant();
+    if (element_type != NULL)
+      return element_type->get_vector (constant_size);
+    return NULL;
+  }
+  if (TREE_CODE (type) == REFERENCE_TYPE)
+  {
+    // For __builtin_ms_va_start.
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID); // FIXME: wrong type.
+  }
+  if (TREE_CODE (type) == RECORD_TYPE)
+  {
+    // For __builtin_sysv_va_copy.
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID); // FIXME: wrong type.
+  }
+  for (int i = 0; i < NUM_FLOATN_NX_TYPES; i++)
+  {
+    if (type == FLOATN_NX_TYPE_NODE (i))
+    {
+      return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID); // FIXME: wrong type.
+    }
+  }
+  if (type == void_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID);
+  }
+  else if (type == ptr_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID_PTR);
+  }
+  else if (type == const_ptr_type_node)
+  {
+    // Void const ptr.
+    recording::type* result = new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID_PTR);
+    return new recording::memento_of_get_const (result);
+  }
+  else if (type == unsigned_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_UNSIGNED_INT);
+  }
+  else if (type == long_unsigned_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_UNSIGNED_LONG);
+  }
+  else if (type == integer_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_INT);
+  }
+  else if (type == long_integer_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_LONG);
+  }
+  else if (type == long_long_integer_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_LONG_LONG);
+  }
+  else if (type == signed_char_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_SIGNED_CHAR);
+  }
+  else if (type == char_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_CHAR);
+  }
+  else if (type == unsigned_intQI_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_UINT8_T);
+  }
+  else if (type == short_integer_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_SHORT);
+  }
+  else if (type == short_unsigned_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_UNSIGNED_SHORT);
+  }
+  else if (type == complex_float_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_COMPLEX_FLOAT);
+  }
+  else if (type == complex_double_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_COMPLEX_DOUBLE);
+  }
+  else if (type == complex_long_double_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_COMPLEX_LONG_DOUBLE);
+  }
+  else if (type == float_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_FLOAT);
+  }
+  else if (type == double_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_DOUBLE);
+  }
+  else if (type == long_double_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_LONG_DOUBLE);
+  }
+  else if (type == bfloat16_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_BFLOAT16);
+  }
+  else if (type == dfloat128_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_VOID); // FIXME: wrong type.
+  }
+  else if (type == long_long_unsigned_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_UNSIGNED_LONG_LONG);
+  }
+  else if (type == boolean_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_BOOL);
+  }
+  else if (type == size_type_node)
+  {
+    return new recording::memento_of_get_type (&target_builtins_ctxt, GCC_JIT_TYPE_SIZE_T);
+  }
+  else if (TREE_CODE (type) == POINTER_TYPE)
+  {
+    tree inner_type = TREE_TYPE (type);
+    recording::type* element_type = tree_type_to_jit_type (inner_type);
+    return element_type->get_pointer();
+  }
+  else
+  {
+    // Attempt to find an unqualified type when the current type has qualifiers.
+    tree tp = TYPE_MAIN_VARIANT (type);
+    for ( ; tp != NULL ; tp = TYPE_NEXT_VARIANT (tp))
+    {
+      if (TYPE_QUALS (tp) == 0 && type != tp)
+      {
+        recording::type* result = tree_type_to_jit_type (tp);
+        if (result != NULL)
+        {
+          if (TYPE_READONLY (tp))
+            result = new recording::memento_of_get_const (result);
+          if (TYPE_VOLATILE (tp))
+            result = new recording::memento_of_get_volatile (result);
+          return result;
+        }
+      }
+    }
+
+    fprintf (stderr, "Unknown type:\n");
+    debug_tree (type);
+    abort ();
+  }
+
+  return NULL;
+}
+
+/* Record a builtin function.  We save their types to be able to check types
+   in recording and for reflection.  */
 
 static tree
 jit_langhook_builtin_function (tree decl)
 {
+  if (TREE_CODE (decl) == FUNCTION_DECL)
+  {
+    const char* name = IDENTIFIER_POINTER (DECL_NAME (decl));
+    target_builtins.put (name, decl);
+
+    std::string string_name(name);
+    if (target_function_types.count (string_name) == 0)
+    {
+      tree function_type = TREE_TYPE (decl);
+      tree arg = TYPE_ARG_TYPES (function_type);
+      bool is_variadic = false;
+
+      auto_vec <recording::type *> param_types;
+
+      while (arg != void_list_node)
+      {
+	if (arg == NULL)
+	{
+	  is_variadic = true;
+	  break;
+	}
+	if (arg != void_list_node)
+	{
+	  recording::type* arg_type = tree_type_to_jit_type(TREE_VALUE (arg));
+	  if (arg_type == NULL)
+            return decl;
+	  param_types.safe_push (arg_type);
+	}
+        arg = TREE_CHAIN (arg);
+      }
+
+      tree result_type = TREE_TYPE (function_type);
+      recording::type* return_type = tree_type_to_jit_type(result_type);
+
+      if (return_type == NULL)
+        return decl;
+
+      recording::function_type* func_type = new recording::function_type (&target_builtins_ctxt, return_type, param_types.length (),
+	param_types.address (), is_variadic, false);
+
+      target_function_types[string_name] = func_type;
+    }
+  }
   return decl;
 }
 
@@ -693,6 +935,25 @@ jit_langhook_getdecls (void)
 {
   return NULL;
 }
+
+static tree
+jit_langhook_eh_personality (void)
+{
+  if (personality_decl == NULL_TREE)
+  {
+    if (jit_personality_func_name != NULL) {
+      personality_decl = build_personality_function_with_name (jit_personality_func_name);
+      jit_preserve_from_gc(personality_decl);
+    }
+    else {
+      return lhd_gcc_personality();
+    }
+  }
+  return personality_decl;
+}
+
+#undef LANG_HOOKS_EH_PERSONALITY
+#define LANG_HOOKS_EH_PERSONALITY jit_langhook_eh_personality
 
 #undef LANG_HOOKS_NAME
 #define LANG_HOOKS_NAME		"libgccjit"

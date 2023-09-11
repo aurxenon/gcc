@@ -29,6 +29,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "libgccjit.h"
 #include "jit-recording.h"
 #include "jit-result.h"
+#include "jit-target.h"
 
 /* The opaque types used by the public API are actually subclasses
    of the gcc::jit::recording classes.  */
@@ -41,6 +42,10 @@ struct gcc_jit_context : public gcc::jit::recording::context
 };
 
 struct gcc_jit_result : public gcc::jit::result
+{
+};
+
+struct gcc_jit_target_info : public target_info
 {
 };
 
@@ -610,6 +615,20 @@ gcc_jit_type_is_pointer (gcc_jit_type *type)
 /* Public entrypoint.  See description in libgccjit.h.
 
    After error-checking, the real work is done by the
+   gcc::jit::recording::type::is_const method, in
+   jit-recording.cc.  */
+
+gcc_jit_type *
+gcc_jit_type_is_const (gcc_jit_type *type)
+{
+  RETURN_NULL_IF_FAIL (type, NULL, NULL, "NULL type");
+
+  return (gcc_jit_type *)type->is_const ();
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
    gcc::jit::recording::type::is_int method, in
    jit-recording.cc.  */
 
@@ -766,7 +785,7 @@ gcc_jit_type *
 gcc_jit_context_new_array_type (gcc_jit_context *ctxt,
 				gcc_jit_location *loc,
 				gcc_jit_type *element_type,
-				int num_elements)
+				unsigned long num_elements)
 {
   RETURN_NULL_IF_FAIL (ctxt, NULL, loc, "NULL context");
   JIT_LOG_FUNC (ctxt->get_logger ());
@@ -798,12 +817,13 @@ gcc_jit_context_new_field (gcc_jit_context *ctxt,
   /* LOC can be NULL.  */
   RETURN_NULL_IF_FAIL (type, ctxt, loc, "NULL type");
   RETURN_NULL_IF_FAIL (name, ctxt, loc, "NULL name");
-  RETURN_NULL_IF_FAIL_PRINTF2 (
+  // TODO: check at playback if the size is known.
+  /*RETURN_NULL_IF_FAIL_PRINTF2 (
     type->has_known_size (),
     ctxt, loc,
     "unknown size for field \"%s\" (type: %s)",
     name,
-    type->get_debug_string ());
+    type->get_debug_string ());*/
   RETURN_NULL_IF_FAIL_PRINTF1 (
     !type->is_void (),
     ctxt, loc,
@@ -1010,6 +1030,7 @@ size_t
 gcc_jit_struct_get_field_count (gcc_jit_struct *struct_type)
 {
   RETURN_VAL_IF_FAIL (struct_type, 0, NULL, NULL, "NULL struct type");
+  RETURN_VAL_IF_FAIL (struct_type->get_fields (), 0, NULL, NULL, "NULL fields");
   return struct_type->get_fields ()->length ();
 }
 
@@ -1760,6 +1781,23 @@ gcc_jit_context_new_array_constructor (gcc_jit_context *ctxt,
     reinterpret_cast<gcc::jit::recording::rvalue**>(values));
 }
 
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
+   gcc::jit::recording::context::get_target_builtin_function method, in
+   jit-recording.c.  */
+
+gcc_jit_function *
+gcc_jit_context_get_target_builtin_function (gcc_jit_context *ctxt,
+                         const char *name)
+{
+  RETURN_NULL_IF_FAIL (ctxt, NULL, NULL, "NULL context");
+  JIT_LOG_FUNC (ctxt->get_logger ());
+  RETURN_NULL_IF_FAIL (name, ctxt, NULL, "NULL name");
+
+  return static_cast <gcc_jit_function *> (ctxt->get_target_builtin_function (name));
+}
+
 /* Public entrypoint.  See description in libgccjit.h.  */
 
 extern gcc_jit_lvalue *
@@ -1866,6 +1904,23 @@ gcc_jit_global_set_initializer (gcc_jit_lvalue *global,
   gbl->set_flags (gcc::jit::GLOBAL_VAR_FLAGS_WILL_BE_BLOB_INIT);
 
   return global;
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
+   gcc::jit::recording::global::set_readonly method, in
+   jit-recording.cc.  */
+
+extern void
+gcc_jit_global_set_readonly (gcc_jit_lvalue *global)
+{
+  RETURN_IF_FAIL (global, NULL, NULL, "NULL global");
+  RETURN_IF_FAIL_PRINTF1 (global->is_global (), NULL, NULL,
+			       "lvalue \"%s\" not a global",
+			       global->get_debug_string ());
+
+  global->set_readonly ();
 }
 
 /* Public entrypoint.  See description in libgccjit.h.
@@ -2437,6 +2492,8 @@ gcc_jit_context_new_cast (gcc_jit_context *ctxt,
   /* LOC can be NULL.  */
   RETURN_NULL_IF_FAIL (rvalue, ctxt, loc, "NULL rvalue");
   RETURN_NULL_IF_FAIL (type, ctxt, loc, "NULL type");
+  gcc::jit::recording::vector_type *vector_type = type->dyn_cast_vector_type ();
+  RETURN_NULL_IF_FAIL (vector_type == NULL, ctxt, loc, "cannot cast vector types");
   RETURN_NULL_IF_FAIL_PRINTF3 (
     is_valid_cast (rvalue->get_type (), type),
     ctxt, loc,
@@ -2501,6 +2558,60 @@ gcc_jit_context_new_array_access (gcc_jit_context *ctxt,
     index->get_type ()->get_debug_string ());
 
   return (gcc_jit_lvalue *)ctxt->new_array_access (loc, ptr, index);
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
+   gcc::jit::recording::context::new_convert_vector method in
+   jit-recording.cc.  */
+
+gcc_jit_rvalue *
+gcc_jit_context_convert_vector (gcc_jit_context *ctxt,
+				gcc_jit_location *loc,
+				gcc_jit_rvalue *vector,
+				gcc_jit_type *type)
+{
+  RETURN_NULL_IF_FAIL (ctxt, NULL, loc, "NULL context");
+  JIT_LOG_FUNC (ctxt->get_logger ());
+  /* LOC can be NULL.  */
+  RETURN_NULL_IF_FAIL (vector, ctxt, loc, "NULL vector");
+  RETURN_NULL_IF_FAIL (type, ctxt, loc, "NULL type");
+
+  // TODO: check if the value is a vector.
+  // TODO: check if type is a vector type.
+  // TODO: check if the number of elements in vector and type matches.
+
+  return (gcc_jit_rvalue *)ctxt->new_convert_vector (loc, vector, type);
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
+   gcc::jit::recording::context::new_vector_access method in
+   jit-recording.cc.  */
+
+extern gcc_jit_lvalue *
+gcc_jit_context_new_vector_access (gcc_jit_context *ctxt,
+				   gcc_jit_location *loc,
+				   gcc_jit_rvalue *vector,
+				   gcc_jit_rvalue *index)
+{
+  RETURN_NULL_IF_FAIL (index, ctxt, loc, "NULL index");
+  RETURN_NULL_IF_FAIL_PRINTF2 (
+    vector->get_type ()->dyn_cast_vector_type (),
+    ctxt, loc,
+    "vector: %s (type: %s) is not a vector",
+    vector->get_debug_string (),
+    vector->get_type ()->get_debug_string ());
+  RETURN_NULL_IF_FAIL_PRINTF2 (
+    index->get_type ()->is_numeric (),
+    ctxt, loc,
+    "index: %s (type: %s) is not of numeric type",
+    index->get_debug_string (),
+    index->get_type ()->get_debug_string ());
+
+  return (gcc_jit_lvalue *)ctxt->new_vector_access (loc, vector, index);
 }
 
 /* Public entrypoint.  See description in libgccjit.h.
@@ -2817,6 +2928,64 @@ gcc_jit_block_add_eval (gcc_jit_block *block,
 }
 
 /* Public entrypoint.  See description in libgccjit.h.
+   After error-checking, the real work is done by the
+   gcc::jit::recording::block::add_try_catch method in jit-recording.c.  */
+
+void
+gcc_jit_block_add_try_catch (gcc_jit_block *block,
+			     gcc_jit_location *loc,
+			     gcc_jit_block *try_block,
+			     gcc_jit_block *catch_block)
+{
+  RETURN_IF_NOT_VALID_BLOCK (block, loc);
+  gcc::jit::recording::context *ctxt = block->get_context ();
+  JIT_LOG_FUNC (ctxt->get_logger ());
+  /* LOC can be NULL.  */
+  RETURN_IF_FAIL (try_block, ctxt, loc, "NULL rvalue");
+  RETURN_IF_FAIL (catch_block, ctxt, loc, "NULL rvalue");
+
+  gcc::jit::recording::statement *stmt = block->add_try_catch (loc, try_block, catch_block);
+
+  // TODO: remove this or use it.
+  /* "stmt" should be good enough to be usable in error-messages,
+     but might still not be compilable; perform some more
+     error-checking here.  We do this here so that the error messages
+     can contain a stringified version of "stmt", whilst appearing
+     as close as possible to the point of failure.  */
+  /*try_block->verify_valid_within_stmt (__func__, stmt);
+  catch_block->verify_valid_within_stmt (__func__, stmt);*/
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+   After error-checking, the real work is done by the
+   gcc::jit::recording::block::add_try_catch method in jit-recording.c.  */
+
+void
+gcc_jit_block_add_try_finally (gcc_jit_block *block,
+			     gcc_jit_location *loc,
+			     gcc_jit_block *try_block,
+			     gcc_jit_block *finally_block)
+{
+  RETURN_IF_NOT_VALID_BLOCK (block, loc);
+  gcc::jit::recording::context *ctxt = block->get_context ();
+  JIT_LOG_FUNC (ctxt->get_logger ());
+  /* LOC can be NULL.  */
+  RETURN_IF_FAIL (try_block, ctxt, loc, "NULL rvalue");
+  RETURN_IF_FAIL (finally_block, ctxt, loc, "NULL rvalue");
+
+  gcc::jit::recording::statement *stmt = block->add_try_catch (loc, try_block, finally_block, true);
+
+  // TODO: remove this or use it.
+  /* "stmt" should be good enough to be usable in error-messages,
+     but might still not be compilable; perform some more
+     error-checking here.  We do this here so that the error messages
+     can contain a stringified version of "stmt", whilst appearing
+     as close as possible to the point of failure.  */
+  /*try_block->verify_valid_within_stmt (__func__, stmt);
+  catch_block->verify_valid_within_stmt (__func__, stmt);*/
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
 
    After error-checking, the real work is done by the
    gcc::jit::recording::block::add_assignment method in
@@ -2836,7 +3005,7 @@ gcc_jit_block_add_assignment (gcc_jit_block *block,
   RETURN_IF_FAIL (rvalue, ctxt, loc, "NULL rvalue");
   RETURN_IF_FAIL_PRINTF4 (
     compatible_types (lvalue->get_type (),
-		      rvalue->get_type ()),
+		      rvalue->get_type ()) || lvalue->get_type ()->is_const () != NULL,
     ctxt, loc,
     "mismatching types:"
     " assignment to %s (type: %s) from %s (type: %s)",
@@ -2882,7 +3051,7 @@ gcc_jit_block_add_assignment_op (gcc_jit_block *block,
   RETURN_IF_FAIL (rvalue, ctxt, loc, "NULL rvalue");
   RETURN_IF_FAIL_PRINTF4 (
     compatible_types (lvalue->get_type (),
-		      rvalue->get_type ()),
+		      rvalue->get_type ()) || lvalue->get_type ()->is_const () != NULL,
     ctxt, loc,
     "mismatching types:"
     " assignment to %s (type: %s) involving %s (type: %s)",
@@ -3591,6 +3760,27 @@ gcc_jit_context_add_command_line_option (gcc_jit_context *ctxt,
 }
 
 /* Public entrypoint.  See description in libgccjit.h.
+   After error-checking, the real work is done by the
+   gcc::jit::recording::function::set_personality_function method, in
+   jit-recording.c.  */
+
+void
+gcc_jit_function_set_personality_function (gcc_jit_function *fn,
+                                           gcc_jit_function *personality_func)
+{
+  RETURN_IF_FAIL (fn, NULL, NULL, "NULL function");
+
+  fn->set_personality_function (personality_func);
+}
+
+extern char* jit_personality_func_name;
+
+void
+gcc_jit_set_global_personality_function_name (char* name) {
+  jit_personality_func_name = name;
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
 
    The real work is done by the
    gcc::jit::recording::context::add_driver_option method in
@@ -3679,6 +3869,44 @@ gcc_jit_context_compile_to_file (gcc_jit_context *ctxt,
   ctxt->compile_to_file (output_kind, output_path);
 }
 
+gcc_jit_target_info *
+gcc_jit_context_get_target_info (gcc_jit_context *ctxt)
+{
+  RETURN_NULL_IF_FAIL (ctxt, NULL, NULL, "NULL context");
+  JIT_LOG_FUNC (ctxt->get_logger ());
+
+  ctxt->log ("get_target_info of ctxt: %p", (void *)ctxt);
+
+  ctxt->get_target_info ();
+
+  return (gcc_jit_target_info*) jit_get_target_info ();
+}
+
+void
+gcc_jit_target_info_release (gcc_jit_target_info *info)
+{
+  RETURN_IF_FAIL (info, NULL, NULL, "NULL info");
+  delete info;
+}
+
+int
+gcc_jit_target_info_cpu_supports (gcc_jit_target_info *info,
+				  const char *feature)
+{
+  return info->has_target_value ("target_feature", feature);
+}
+
+const char *
+gcc_jit_target_info_arch (gcc_jit_target_info *info)
+{
+  return info->m_arch;
+}
+
+int
+gcc_jit_target_info_supports_128bit_int (gcc_jit_target_info *info)
+{
+  return info->m_supports_128bit_int;
+}
 
 /* Public entrypoint.  See description in libgccjit.h.
 
@@ -3965,6 +4193,38 @@ gcc_jit_type_get_aligned (gcc_jit_type *type,
   return (gcc_jit_type *)type->get_aligned (alignment_in_bytes);
 }
 
+void
+gcc_jit_type_set_packed (gcc_jit_type *type)
+{
+  RETURN_IF_FAIL (type, NULL, NULL, "NULL type");
+
+  type->set_packed ();
+}
+
+void
+gcc_jit_function_add_attribute (gcc_jit_function *func, gcc_jit_fn_attribute attribute)
+{
+  RETURN_IF_FAIL (func, NULL, NULL, "NULL func");
+
+  func->add_attribute (attribute);
+}
+
+void
+gcc_jit_function_add_string_attribute (gcc_jit_function *func, gcc_jit_fn_attribute attribute, const char* value)
+{
+  RETURN_IF_FAIL (func, NULL, NULL, "NULL func");
+
+  func->add_string_attribute (attribute, value);
+}
+
+void
+gcc_jit_lvalue_add_attribute (gcc_jit_lvalue *variable, gcc_jit_variable_attribute attribute, const char* value)
+{
+  RETURN_IF_FAIL (variable, NULL, NULL, "NULL variable");
+
+  variable->add_attribute (attribute, value);
+}
+
 /* Public entrypoint.  See description in libgccjit.h.
 
    After error-checking, the real work is done by the
@@ -4069,6 +4329,74 @@ gcc_jit_context_new_rvalue_from_vector (gcc_jit_context *ctxt,
     (loc,
      as_vec_type,
      (gcc::jit::recording::rvalue **)elements);
+}
+
+/* Public entrypoint.  See description in libgccjit.h.
+
+   After error-checking, the real work is done by the
+   gcc::jit::recording::context::new_rvalue_vector_perm method, in
+   jit-recording.cc.  */
+
+gcc_jit_rvalue *
+gcc_jit_context_new_rvalue_vector_perm (gcc_jit_context *ctxt,
+					gcc_jit_location *loc,
+					gcc_jit_rvalue *elements1,
+					gcc_jit_rvalue *elements2,
+					gcc_jit_rvalue *mask)
+{
+  RETURN_NULL_IF_FAIL (ctxt, NULL, loc, "NULL ctxt");
+  JIT_LOG_FUNC (ctxt->get_logger ());
+
+  /* LOC can be NULL.  */
+
+  gcc::jit::recording::type *elements1_type = elements1->get_type ();
+  gcc::jit::recording::type *elements2_type = elements2->get_type ();
+  RETURN_NULL_IF_FAIL_PRINTF4 (
+    compatible_types (elements1->get_type ()->unqualified (),
+		      elements2->get_type ()->unqualified ()),
+    ctxt, loc,
+    "mismatching types for vector perm:"
+    " elements1: %s (type: %s) elements2: %s (type: %s)",
+    elements1->get_debug_string (),
+    elements1_type->get_debug_string (),
+    elements2->get_debug_string (),
+    elements2_type->get_debug_string ());
+
+  gcc::jit::recording::type *mask_type = mask->get_type ();
+  gcc::jit::recording::vector_type *mask_vector_type = mask_type->dyn_cast_vector_type ();
+  gcc::jit::recording::vector_type *elements1_vector_type = elements1_type->dyn_cast_vector_type ();
+
+  size_t mask_len = mask_vector_type->get_num_units ();
+  size_t elements1_len = elements1_vector_type->get_num_units ();
+
+  RETURN_NULL_IF_FAIL_PRINTF2 (
+    mask_len == elements1_len,
+    ctxt, loc,
+    "mismatching length for mask:"
+    " elements1 length: %ld mask length: %ld",
+    mask_len,
+    elements1_len);
+
+  gcc::jit::recording::type *mask_element_type = mask_vector_type->get_element_type ();
+
+  RETURN_NULL_IF_FAIL (
+    mask_element_type->is_int (),
+    ctxt, loc,
+    "elements of mask must be of an integer type");
+
+  gcc::jit::recording::type *elements1_element_type = elements1_vector_type->get_element_type ();
+  size_t mask_element_size = mask_element_type->get_size ();
+  size_t elements1_element_size = elements1_element_type->get_size ();
+
+  RETURN_NULL_IF_FAIL_PRINTF2 (
+    mask_element_size == elements1_element_size,
+    ctxt, loc,
+    "mismatching size for mask element type:"
+    " elements1 element type: %ld mask element type: %ld",
+    mask_element_size,
+    elements1_element_size);
+
+  return (gcc_jit_rvalue *)ctxt->new_rvalue_vector_perm(loc, elements1, elements2, mask);
 }
 
 /* A mutex around the cached state in parse_basever.

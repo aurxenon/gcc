@@ -274,5 +274,60 @@ LIBGCCJIT_ABI_24 {
 
 LIBGCCJIT_ABI_25 {
   global:
-    gcc_jit_type_get_restrict;
+    gcc_jit_type_set_packed;
 } LIBGCCJIT_ABI_24;
+
+LIBGCCJIT_ABI_26 {
+  global:
+    gcc_jit_type_is_const;
+} LIBGCCJIT_ABI_25;
+
+LIBGCCJIT_ABI_27 {
+  global:
+    gcc_jit_context_convert_vector;
+} LIBGCCJIT_ABI_26;
+
+LIBGCCJIT_ABI_28 {
+  global:
+    gcc_jit_global_set_readonly;
+} LIBGCCJIT_ABI_27;
+
+LIBGCCJIT_ABI_29 {
+  global:
+    gcc_jit_function_add_attribute;
+    gcc_jit_function_add_string_attribute;
+} LIBGCCJIT_ABI_28;
+
+LIBGCCJIT_ABI_30 {
+  global:
+    gcc_jit_lvalue_add_attribute;
+} LIBGCCJIT_ABI_29;
+
+LIBGCCJIT_ABI_31 {
+  global:
+    gcc_jit_block_add_try_catch;
+    gcc_jit_block_add_try_finally;
+    gcc_jit_function_set_personality_function;
+} LIBGCCJIT_ABI_30;
+
+LIBGCCJIT_ABI_32 {
+  global:
+    gcc_jit_context_get_target_builtin_function;
+    gcc_jit_context_new_rvalue_vector_perm;
+    gcc_jit_context_new_vector_access;
+    gcc_jit_set_global_personality_function_name;
+} LIBGCCJIT_ABI_31;
+
+LIBGCCJIT_ABI_33 {
+  global:
+    gcc_jit_context_get_target_info;
+    gcc_jit_target_info_release;
+    gcc_jit_target_info_cpu_supports;
+    gcc_jit_target_info_arch;
+    gcc_jit_target_info_supports_128bit_int;
+} LIBGCCJIT_ABI_32;
+
+LIBGCCJIT_ABI_34 {
+  global:
+    gcc_jit_type_get_restrict;
+} LIBGCCJIT_ABI_33;
